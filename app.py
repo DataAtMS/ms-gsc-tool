@@ -6,13 +6,9 @@ import streamlit as st
 import pandas as pd
 import json
 from datetime import datetime, timedelta
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import pickle
 import os
-import tempfile
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -42,76 +38,56 @@ if 'last_response_text' not in st.session_state:
     st.session_state.last_response_text = ''
 
 def authenticate():
-    """Authenticate with Google Search Console API."""
-    creds = None
+    """Authenticate with Google Search Console API using Service Account."""
+    service_account_info = None
     
-    # Check for saved credentials
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
+    # Try to get service account credentials from Streamlit secrets first (for Streamlit Cloud)
+    try:
+        if 'GOOGLE_SERVICE_ACCOUNT' in st.secrets:
+            service_account_secret = st.secrets['GOOGLE_SERVICE_ACCOUNT']
+            # Build service account dictionary from secrets
+            # Access fields directly like service_account_secret['type'], etc.
+            service_account_info = {
+                "type": service_account_secret['type'],
+                "project_id": service_account_secret['project_id'],
+                "private_key_id": service_account_secret['private_key_id'],
+                "private_key": service_account_secret['private_key'],
+                "client_email": service_account_secret['client_email'],
+                "client_id": service_account_secret.get('client_id', ''),
+                "auth_uri": service_account_secret.get('auth_uri', 'https://accounts.google.com/o/oauth2/auth'),
+                "token_uri": service_account_secret.get('token_uri', 'https://oauth2.googleapis.com/token'),
+                "auth_provider_x509_cert_url": service_account_secret.get('auth_provider_x509_cert_url', 'https://www.googleapis.com/oauth2/v1/certs'),
+                "client_x509_cert_url": service_account_secret.get('client_x509_cert_url', '')
+            }
+    except KeyError as e:
+        # Missing required field in secrets, will fall back to local file
+        service_account_info = None
+    except Exception:
+        # If secrets fail for any reason, fall back to local file
+        service_account_info = None
     
-    # If no valid credentials, get new ones
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+    # Fall back to local service_account.json file if secrets not available
+    if service_account_info is None:
+        if os.path.exists('service_account.json'):
+            # Read from local file
+            with open('service_account.json', 'r') as f:
+                service_account_info = json.load(f)
         else:
-            # Try to get credentials from Streamlit secrets first (for Streamlit Cloud)
-            credentials_dict = None
-            try:
-                if 'GOOGLE_CREDENTIALS' in st.secrets:
-                    creds_secret = st.secrets['GOOGLE_CREDENTIALS']
-                    # Build credentials dictionary from secrets
-                    # Access fields directly like creds_secret['client_id'], etc.
-                    credentials_dict = {
-                        "installed": {
-                            "client_id": creds_secret['client_id'],
-                            "project_id": creds_secret['project_id'],
-                            "auth_uri": creds_secret.get('auth_uri', 'https://accounts.google.com/o/oauth2/auth'),
-                            "token_uri": creds_secret.get('token_uri', 'https://oauth2.googleapis.com/token'),
-                            "auth_provider_x509_cert_url": creds_secret.get('auth_provider_x509_cert_url', 'https://www.googleapis.com/oauth2/v1/certs'),
-                            "client_secret": creds_secret['client_secret'],
-                            "redirect_uris": creds_secret.get('redirect_uris', ['http://localhost'])
-                        }
-                    }
-            except KeyError as e:
-                # Missing required field in secrets, will fall back to local file
-                credentials_dict = None
-            except Exception:
-                # If secrets fail for any reason, fall back to local file
-                credentials_dict = None
-            
-            # Fall back to local credentials.json file if secrets not available
-            if credentials_dict is None:
-                if os.path.exists('credentials.json'):
-                    # Read from local file
-                    with open('credentials.json', 'r') as f:
-                        credentials_dict = json.load(f)
-                else:
-                    st.error("ERROR: Google OAuth credentials not found! Please either:\n"
-                           "1. Add GOOGLE_CREDENTIALS to Streamlit secrets (for Streamlit Cloud), or\n"
-                           "2. Place credentials.json file in the project directory (for local development)")
-                    return None
-            
-            # Write credentials to a temporary file for InstalledAppFlow
-            # (InstalledAppFlow.from_client_secrets_file requires a file path)
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-                json.dump(credentials_dict, temp_file)
-                temp_file_path = temp_file.name
-            
-            try:
-                # Use credentials from temporary file
-                flow = InstalledAppFlow.from_client_secrets_file(temp_file_path, SCOPES)
-                creds = flow.run_local_server(port=0)
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_file_path):
-                    os.unlink(temp_file_path)
-        
-        # Save for next time
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
+            st.error("ERROR: Google Service Account credentials not found! Please either:\n"
+                   "1. Add GOOGLE_SERVICE_ACCOUNT to Streamlit secrets (for Streamlit Cloud), or\n"
+                   "2. Place service_account.json file in the project directory (for local development)")
+            return None
     
-    return creds
+    # Create credentials from service account info
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=SCOPES
+        )
+        return creds
+    except Exception as e:
+        st.error(f"ERROR: Failed to create service account credentials: {e}")
+        return None
 
 def fetch_gsc_data(service, site_url, start_date, end_date, dimensions):
     """Fetch data from Google Search Console."""
@@ -289,9 +265,9 @@ with st.sidebar:
         st.info("Please add your API key to the .env file:\n`ANTHROPIC_API_KEY=your_key_here`")
     
     st.markdown("---")
-    st.markdown("**Note:** Google OAuth credentials can be configured either:\n"
-                "- In Streamlit secrets as `GOOGLE_CREDENTIALS` (for Streamlit Cloud), or\n"
-                "- As `credentials.json` file (for local development)")
+    st.markdown("**Note:** Google Service Account credentials can be configured either:\n"
+                "- In Streamlit secrets as `GOOGLE_SERVICE_ACCOUNT` (for Streamlit Cloud), or\n"
+                "- As `service_account.json` file (for local development)")
 
 # Main interface
 domain_input = st.text_input(
