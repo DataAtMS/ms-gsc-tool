@@ -44,24 +44,11 @@ def authenticate():
     # Try to get service account credentials from Streamlit secrets first (for Streamlit Cloud)
     try:
         if 'GOOGLE_SERVICE_ACCOUNT' in st.secrets:
-            service_account_secret = st.secrets['GOOGLE_SERVICE_ACCOUNT']
-            # Build service account dictionary from secrets
-            # Access fields directly like service_account_secret['type'], etc.
-            service_account_info = {
-                "type": service_account_secret['type'],
-                "project_id": service_account_secret['project_id'],
-                "private_key_id": service_account_secret['private_key_id'],
-                "private_key": service_account_secret['private_key'],
-                "client_email": service_account_secret['client_email'],
-                "client_id": service_account_secret.get('client_id', ''),
-                "auth_uri": service_account_secret.get('auth_uri', 'https://accounts.google.com/o/oauth2/auth'),
-                "token_uri": service_account_secret.get('token_uri', 'https://oauth2.googleapis.com/token'),
-                "auth_provider_x509_cert_url": service_account_secret.get('auth_provider_x509_cert_url', 'https://www.googleapis.com/oauth2/v1/certs'),
-                "client_x509_cert_url": service_account_secret.get('client_x509_cert_url', '')
-            }
-    except KeyError as e:
-        # Missing required field in secrets, will fall back to local file
-        service_account_info = None
+            # Read the service account dictionary directly from secrets (TOML format)
+            service_account_info = st.secrets['GOOGLE_SERVICE_ACCOUNT']
+            # Convert to dict if it's not already (Streamlit secrets might return a dict-like object)
+            if not isinstance(service_account_info, dict):
+                service_account_info = dict(service_account_info)
     except Exception:
         # If secrets fail for any reason, fall back to local file
         service_account_info = None
@@ -78,7 +65,7 @@ def authenticate():
                    "2. Place service_account.json file in the project directory (for local development)")
             return None
     
-    # Create credentials from service account info
+    # Create credentials from service account info dictionary
     try:
         creds = service_account.Credentials.from_service_account_info(
             service_account_info,
