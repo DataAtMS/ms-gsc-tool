@@ -1,5 +1,6 @@
 """
-Streamlit app for Google Search Console data analysis with Claude AI chat
+MENTIONSTACK Content Engine
+Production-ready SEO content generation tool
 """
 
 import streamlit as st
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import os
+import time
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -28,44 +30,52 @@ if 'claude_api_key' not in st.session_state:
     st.session_state.claude_api_key = ANTHROPIC_API_KEY
 if 'gsc_data' not in st.session_state:
     st.session_state.gsc_data = None
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
 if 'domain' not in st.session_state:
     st.session_state.domain = ''
-if 'last_response_cut_off' not in st.session_state:
-    st.session_state.last_response_cut_off = False
-if 'last_response_text' not in st.session_state:
-    st.session_state.last_response_text = ''
+if 'current_tab' not in st.session_state:
+    st.session_state.current_tab = 'opportunities'
+if 'selected_opportunities' not in st.session_state:
+    st.session_state.selected_opportunities = set()
+if 'expanded_opportunity' not in st.session_state:
+    st.session_state.expanded_opportunity = None
+if 'generated_content' not in st.session_state:
+    st.session_state.generated_content = []
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'generation_in_progress' not in st.session_state:
+    st.session_state.generation_in_progress = False
+if 'generation_queue' not in st.session_state:
+    st.session_state.generation_queue = []
+if 'generation_status' not in st.session_state:
+    st.session_state.generation_status = {}
+if 'show_confirm_modal' not in st.session_state:
+    st.session_state.show_confirm_modal = False
+if 'pending_generation' not in st.session_state:
+    st.session_state.pending_generation = None
+
+# ============================================================================
+# AUTHENTICATION & DATA FETCHING (PRESERVED)
+# ============================================================================
 
 def authenticate():
     """Authenticate with Google Search Console API using Service Account."""
     service_account_info = None
     
-    # Try to get service account credentials from Streamlit secrets first (for Streamlit Cloud)
     try:
         if 'GOOGLE_SERVICE_ACCOUNT' in st.secrets:
-            # Read the service account dictionary directly from secrets (TOML format)
             service_account_info = st.secrets['GOOGLE_SERVICE_ACCOUNT']
-            # Convert to dict if it's not already (Streamlit secrets might return a dict-like object)
             if not isinstance(service_account_info, dict):
                 service_account_info = dict(service_account_info)
     except Exception:
-        # If secrets fail for any reason, fall back to local file
         service_account_info = None
     
-    # Fall back to local service_account.json file if secrets not available
     if service_account_info is None:
         if os.path.exists('service_account.json'):
-            # Read from local file
             with open('service_account.json', 'r') as f:
                 service_account_info = json.load(f)
         else:
-            st.error("ERROR: Google Service Account credentials not found! Please either:\n"
-                   "1. Add GOOGLE_SERVICE_ACCOUNT to Streamlit secrets (for Streamlit Cloud), or\n"
-                   "2. Place service_account.json file in the project directory (for local development)")
             return None
     
-    # Create credentials from service account info dictionary
     try:
         creds = service_account.Credentials.from_service_account_info(
             service_account_info,
@@ -73,7 +83,6 @@ def authenticate():
         )
         return creds
     except Exception as e:
-        st.error(f"ERROR: Failed to create service account credentials: {e}")
         return None
 
 def fetch_gsc_data(service, site_url, start_date, end_date, dimensions):
@@ -85,15 +94,12 @@ def fetch_gsc_data(service, site_url, start_date, end_date, dimensions):
             'dimensions': dimensions,
             'rowLimit': 25000
         }
-        
         response = service.searchanalytics().query(
             siteUrl=site_url,
             body=request
         ).execute()
-        
         return response.get('rows', [])
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
         return []
 
 def format_data(rows, dimensions):
@@ -111,345 +117,809 @@ def format_data(rows, dimensions):
         formatted.append(item)
     return formatted
 
-def calculate_summary_stats(queries, pages):
-    """Calculate summary statistics from GSC data."""
-    if not queries and not pages:
-        return None
-    
-    all_data = queries + pages
-    
-    total_clicks = sum(item['clicks'] for item in all_data)
-    total_impressions = sum(item['impressions'] for item in all_data)
-    
-    if total_impressions > 0:
-        avg_ctr = total_clicks / total_impressions
-    else:
-        avg_ctr = 0
-    
-    if all_data:
-        avg_position = sum(item['position'] for item in all_data) / len(all_data)
-    else:
-        avg_position = 0
-    
-    return {
-        'total_clicks': total_clicks,
-        'total_impressions': total_impressions,
-        'avg_ctr': avg_ctr,
-        'avg_position': avg_position,
-        'query_count': len(queries),
-        'page_count': len(pages)
-    }
+# ============================================================================
+# OPPORTUNITY SCORING
+# ============================================================================
 
-def call_claude_api(api_key, messages, gsc_data):
-    """Call Claude API with chat history and GSC data context."""
+def calculate_opportunity_score(row):
+    """Calculate opportunity score 1-100 based on position, impressions, and CTR."""
+    score = 0
+    position = row.get('position', 100)
+    impressions = row.get('impressions', 0)
+    actual_ctr = row.get('ctr', 0)
+    
+    # Position scoring
+    if 4 <= position <= 10:
+        score += 35
+    elif 11 <= position <= 15:
+        score += 28
+    elif 1 <= position <= 3:
+        score += 15
+    elif 16 <= position <= 30:
+        score += 20
+    else:
+        score += 10
+    
+    # Impressions scoring
+    if impressions >= 10000:
+        score += 30
+    elif impressions >= 5000:
+        score += 25
+    elif impressions >= 1000:
+        score += 18
+    elif impressions >= 500:
+        score += 12
+    else:
+        score += 5
+    
+    # CTR scoring
+    expected_ctr = {
+        1: 0.28, 2: 0.15, 3: 0.11, 4: 0.08, 5: 0.07,
+        6: 0.05, 7: 0.04, 8: 0.035, 9: 0.03, 10: 0.025
+    }.get(int(position), 0.02)
+    
+    if actual_ctr < expected_ctr * 0.5:
+        score += 25
+    elif actual_ctr < expected_ctr * 0.75:
+        score += 18
+    elif actual_ctr < expected_ctr:
+        score += 10
+    else:
+        score += 5
+    
+    return min(score, 100)
+
+def prepare_opportunities(gsc_data):
+    """Prepare opportunities from GSC data with scoring."""
+    if not gsc_data:
+        return []
+    
+    opportunities = []
+    
+    # Process queries
+    for query_row in gsc_data.get('queries', []):
+        if query_row.get('impressions', 0) >= 100:  # Minimum threshold
+            opportunities.append({
+                'id': f"query_{query_row['query']}",
+                'type': 'NEW',
+                'keyword': query_row['query'],
+                'page': None,
+                'position': query_row['position'],
+                'impressions': query_row['impressions'],
+                'ctr': query_row['ctr'],
+                'clicks': query_row['clicks'],
+                'score': calculate_opportunity_score(query_row)
+            })
+    
+    # Process pages
+    for page_row in gsc_data.get('pages', []):
+        if page_row.get('impressions', 0) >= 100:
+            page_url = page_row['page']
+            # Extract keyword from URL or use page title
+            keyword = page_url.split('/')[-1].replace('-', ' ').title()
+            opportunities.append({
+                'id': f"page_{page_url}",
+                'type': 'REFRESH',
+                'keyword': keyword,
+                'page': page_url,
+                'position': page_row['position'],
+                'impressions': page_row['impressions'],
+                'ctr': page_row['ctr'],
+                'clicks': page_row['clicks'],
+                'score': calculate_opportunity_score(page_row)
+            })
+    
+    # Sort by score descending and take top 25
+    opportunities.sort(key=lambda x: x['score'], reverse=True)
+    return opportunities[:25]
+
+# ============================================================================
+# CONTENT GENERATION
+# ============================================================================
+
+def generate_content_brief(opportunity, custom_brief=""):
+    """Generate a brief for content generation using Claude."""
+    keyword = opportunity['keyword']
+    opp_type = opportunity['type']
+    position = opportunity['position']
+    impressions = opportunity['impressions']
+    ctr = opportunity['ctr']
+    page_url = opportunity.get('page', '')
+    
+    brief = f"""Generate SEO-optimized content for this opportunity:
+
+Keyword: {keyword}
+Type: {opp_type}
+Current Position: {position}
+Impressions: {impressions:,}
+Current CTR: {ctr:.2%}
+Target URL: {page_url if page_url else 'New page needed'}
+
+"""
+    if custom_brief:
+        brief += f"Additional Instructions: {custom_brief}\n\n"
+    
+    if opp_type == 'REFRESH':
+        brief += """This is a REFRESH opportunity. Update existing content:
+- Maintain core topic and URL
+- Update outdated statistics and references to 2026
+- Strengthen weak sections
+- Improve structure if needed
+"""
+    else:
+        brief += """This is a NEW content opportunity. Create comprehensive content:
+- Be the best resource on this keyword
+- Include unique angles competitors miss
+"""
+    
+    return brief
+
+def call_claude_for_content(api_key, brief):
+    """Call Claude API to generate content."""
+    if not api_key:
+        return None, "API key not configured"
+    
     try:
-        if not api_key:
-            return "Error: Claude API key is not set. Please set ANTHROPIC_API_KEY in your .env file.", False
         client = Anthropic(api_key=api_key)
         
-        # Sort data by clicks for most relevant examples
-        queries_sorted = sorted(gsc_data.get('queries', []), key=lambda x: x.get('clicks', 0), reverse=True)
-        pages_sorted = sorted(gsc_data.get('pages', []), key=lambda x: x.get('clicks', 0), reverse=True)
+        system_prompt = """You are an expert SEO content writer for a health and wellness brand. Generate high-quality, publication-ready content.
+
+CONTENT REQUIREMENTS
+Structure:
+- Open with a compelling hook that addresses the reader's core problem or desire
+- First paragraph must contain a standalone, quotable definition or key insight (citation hook for AI systems)
+- Use clear H2 subheadings that match search intent (not clever, but clear)
+- Include an FAQ section with 3-5 questions based on "People Also Ask"
+- End with a clear next step or CTA
+
+Formatting:
+- Output valid HTML with proper tags: <h1>, <h2>, <p>, <ul>, <li>, <a>
+- Include 3-5 internal links using <a href="/page-slug">anchor text</a> format
+- Include 1-2 external links to authoritative sources
+- Target 1,500-2,000 words for comprehensive guides
+- Target 800-1,200 words for focused articles
+
+Tone:
+- Expert but accessible
+- Confident, not hedging
+- Use "you" to address the reader directly
+- Avoid fluff and filler phrases
+
+SEO Elements:
+- Title tag: Under 60 characters, includes primary keyword naturally
+- Meta description: 150-160 characters, compelling and includes keyword
+- H1: Can differ slightly from title tag, but aligned
+
+Output format:
+Provide your response as JSON with these keys:
+{
+  "title_tag": "...",
+  "meta_description": "...",
+  "content": "<h1>...</h1><p>...</p>..."
+}"""
         
-        # Get top performers for context (balance between completeness and token limits)
-        top_queries = queries_sorted[:300]
-        top_pages = pages_sorted[:300]
-        
-        summary = gsc_data.get('summary', {})
-        
-        # Prepare system message with GSC data context
-        system_message = f"""You are an SEO analyst helping analyze Google Search Console data.
-
-Domain: {gsc_data.get('domain', 'unknown')}
-Date Range: {gsc_data.get('date_range', 'unknown')}
-
-Summary Statistics:
-- Total queries in dataset: {len(gsc_data.get('queries', [])):,}
-- Total pages in dataset: {len(gsc_data.get('pages', [])):,}
-- Total clicks: {summary.get('total_clicks', 0):,}
-- Total impressions: {summary.get('total_impressions', 0):,}
-- Average CTR: {summary.get('avg_ctr', 0):.2%}
-- Average position: {summary.get('avg_position', 0):.2f}
-
-GSC Data (Top 300 queries and pages by clicks):
-
-Top Queries:
-{json.dumps(top_queries, indent=2)}
-
-Top Pages:
-{json.dumps(top_pages, indent=2)}
-
-You have access to the full dataset with {len(gsc_data.get('queries', []))} queries and {len(gsc_data.get('pages', []))} pages. When answering questions, reference specific data points, queries, pages, and metrics. Be analytical and provide actionable insights. Use specific numbers and examples from the data."""
-        
-        # Build messages from chat history
-        formatted_messages = []
-        for msg in messages:
-            formatted_messages.append({
-                "role": msg["role"],
-                "content": msg["content"]
-            })
-        
-        # Try the requested model, fallback to a known working model if it fails
-        try:
-            response = client.messages.create(
-                model="claude-opus-4-5-20251101",
-                max_tokens=8000,
-                system=system_message,
-                messages=formatted_messages
-            )
-        except Exception as model_error:
-            # If model name is invalid, try a fallback model
-            if "model" in str(model_error).lower() or "invalid" in str(model_error).lower():
-                st.warning(f"Model 'claude-opus-4-5-20251101' may not be available. Trying fallback model...")
-                response = client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
-                    max_tokens=8000,
-                    system=system_message,
-                    messages=formatted_messages
-                )
-            else:
-                raise
+        response = client.messages.create(
+            model="claude-opus-4-5-20251101",
+            max_tokens=8000,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": brief
+            }]
+        )
         
         response_text = response.content[0].text
-        # Check stop_reason - it's an attribute of the response object
-        stop_reason = getattr(response, 'stop_reason', None)
         
-        # Check if response was cut off (max_tokens reached)
-        # Also check if response seems incomplete (ends mid-sentence)
-        was_cut_off = stop_reason == 'max_tokens' if stop_reason else False
-        
-        # Additional check: if response doesn't end with punctuation, it might be cut off
-        if not was_cut_off and response_text:
-            last_char = response_text.strip()[-1] if response_text.strip() else ''
-            # If doesn't end with sentence-ending punctuation, might be cut off
-            if last_char not in ['.', '!', '?', ':', ';'] and len(response_text) > 1000:
-                was_cut_off = True
-        
-        return response_text, was_cut_off
+        # Try to parse as JSON
+        try:
+            # Extract JSON from response (might have markdown code blocks)
+            if "```json" in response_text:
+                json_start = response_text.find("```json") + 7
+                json_end = response_text.find("```", json_start)
+                response_text = response_text[json_start:json_end].strip()
+            elif "```" in response_text:
+                json_start = response_text.find("```") + 3
+                json_end = response_text.find("```", json_start)
+                response_text = response_text[json_start:json_end].strip()
+            
+            content_data = json.loads(response_text)
+            return content_data, None
+        except:
+            # If JSON parsing fails, create structure from text
+            return {
+                "title_tag": brief.split('\n')[0].replace('Keyword: ', ''),
+                "meta_description": response_text[:160],
+                "content": response_text
+            }, None
+            
     except Exception as e:
-        error_msg = str(e)
-        if "model" in error_msg.lower() or "invalid" in error_msg.lower():
-            return f"Error: Invalid model name or API error. Please check your API key and model name. Details: {error_msg}", False
-        return f"Error calling Claude API: {error_msg}", False
+        return None, str(e)
 
-# Streamlit UI
-try:
-    st.set_page_config(page_title="GSC Data Analyzer", layout="wide")
-except Exception:
-    pass  # Page config already set
-
-st.title("Google Search Console Data Analyzer")
-
-# Sidebar
-with st.sidebar:
-    st.header("Settings")
+def generate_opportunity_analysis(api_key, opportunity):
+    """Generate why and recommended approach for an opportunity."""
+    if not api_key:
+        return "Analysis unavailable", "Configure API key to see recommendations"
     
-    # Check if API key is loaded
-    if st.session_state.claude_api_key:
-        st.success("✅ Claude API key loaded from .env")
-    else:
-        st.error("⚠️ ANTHROPIC_API_KEY not found in .env file")
-        st.info("Please add your API key to the .env file:\n`ANTHROPIC_API_KEY=your_key_here`")
-    
-    st.markdown("---")
-    st.markdown("**Note:** Google Service Account credentials can be configured either:\n"
-                "- In Streamlit secrets as `GOOGLE_SERVICE_ACCOUNT` (for Streamlit Cloud), or\n"
-                "- As `service_account.json` file (for local development)")
+    try:
+        client = Anthropic(api_key=api_key)
+        
+        prompt = f"""Analyze this SEO opportunity and provide:
+1. Why this is a good opportunity (2-3 bullet points)
+2. Recommended approach (3-4 actionable steps)
 
-# Main interface
-domain_input = st.text_input(
-    "Domain",
-    value=st.session_state.domain,
-    placeholder="sc-domain:example.com or https://example.com/",
-    help="Enter the exact domain format from Google Search Console"
+Opportunity:
+- Keyword: {opportunity['keyword']}
+- Type: {opportunity['type']}
+- Position: {opportunity['position']}
+- Impressions: {opportunity['impressions']:,}
+- CTR: {opportunity['ctr']:.2%}
+- Score: {opportunity['score']}/100
+
+Be specific and actionable. Reference the actual numbers."""
+        
+        response = client.messages.create(
+            model="claude-opus-4-5-20251101",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        analysis = response.content[0].text
+        
+        # Split into why and approach
+        if "Recommended" in analysis or "Approach" in analysis:
+            parts = analysis.split("Recommended", 1)
+            why = parts[0].strip()
+            approach = "Recommended" + parts[1] if len(parts) > 1 else ""
+        else:
+            why = analysis
+            approach = "See recommendations above."
+        
+        return why, approach
+    except:
+        return "Analysis unavailable", "Error generating analysis"
+
+# ============================================================================
+# STYLING & UI HELPERS
+# ============================================================================
+
+def apply_custom_css():
+    """Apply custom CSS for brand styling."""
+    st.markdown("""
+    <style>
+    /* Brand Colors */
+    :root {
+        --primary-purple: #6B46C1;
+        --light-purple: #F3E8FF;
+        --white: #FFFFFF;
+        --black: #1A1A1A;
+        --gray: #6B7280;
+        --green-bg: #10B981;
+        --green-text: #065F46;
+        --orange-bg: #F59E0B;
+        --orange-text: #92400E;
+        --red: #EF4444;
+    }
+    
+    /* Main container */
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
+    /* Headers */
+    h1, h2, h3 {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: var(--black);
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    
+    /* Selected row styling */
+    .selected-row {
+        background-color: var(--light-purple) !important;
+    }
+    
+    /* Badges */
+    .badge-new {
+        background-color: var(--green-bg);
+        color: var(--green-text);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+    
+    .badge-refresh {
+        background-color: var(--orange-bg);
+        color: var(--orange-text);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# ============================================================================
+# MAIN UI
+# ============================================================================
+
+# Page config
+st.set_page_config(
+    page_title="MENTIONSTACK Content Engine",
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-col1, col2 = st.columns([1, 4])
+apply_custom_css()
+
+# Header
+col1, col2, col3 = st.columns([3, 1, 1])
 with col1:
-    pull_button = st.button("Pull GSC Data", type="primary")
+    st.markdown("### <span style='color: #6B46C1; font-weight: bold;'>◆ MENTIONSTACK</span>", unsafe_allow_html=True)
+    st.markdown("<span style='color: #6B7280; font-size: 14px;'>Content Engine</span>", unsafe_allow_html=True)
+with col3:
+    if st.button("🔄 Refresh Data", use_container_width=True):
+        st.session_state.gsc_data = None
+        st.session_state.selected_opportunities = set()
+        st.rerun()
 
-if pull_button:
-    if not domain_input:
-        st.error("Please enter a domain")
-    else:
-        st.session_state.domain = domain_input
-        with st.spinner("Authenticating and fetching data..."):
-            # Authenticate
-            creds = authenticate()
-            if creds:
-                service = build(API_SERVICE_NAME, API_VERSION, credentials=creds)
-                
-                # Calculate date range (last 90 days)
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=90)
-                start_str = start_date.strftime('%Y-%m-%d')
-                end_str = end_date.strftime('%Y-%m-%d')
-                
-                # Fetch query data
-                query_rows = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
-                query_data = format_data(query_rows, ['query'])
-                
-                # Fetch page data
-                page_rows = fetch_gsc_data(service, domain_input, start_str, end_str, ['page'])
-                page_data = format_data(page_rows, ['page'])
-                
-                # Calculate summary
-                summary = calculate_summary_stats(query_data, page_data)
-                
-                # Store in session state
-                st.session_state.gsc_data = {
-                    'queries': query_data,
-                    'pages': page_data,
-                    'summary': summary,
-                    'domain': domain_input,
-                    'date_range': f"{start_str} to {end_str}"
-                }
-                
-                st.success("Data loaded successfully!")
+st.markdown("---")
+
+# Tab Navigation
+tab1, tab2 = st.tabs(["📊 Opportunities", "📝 Generated Content"])
+
+# ============================================================================
+# TAB 1: OPPORTUNITIES
+# ============================================================================
+
+with tab1:
+    # Domain input (if no data loaded)
+    if not st.session_state.gsc_data:
+        st.markdown("### Connect Your Search Console Data")
+        domain_input = st.text_input(
+            "Domain",
+            value=st.session_state.domain,
+            placeholder="sc-domain:example.com or https://example.com/",
+            help="Enter the exact domain format from Google Search Console"
+        )
+        
+        if st.button("Pull GSC Data", type="primary", use_container_width=True):
+            if not domain_input:
+                st.error("Please enter a domain")
             else:
-                st.error("Authentication failed")
+                st.session_state.domain = domain_input
+                with st.status("Connecting to Search Console...", expanded=True) as status:
+                    status.update(label="Connecting to Search Console...", state="running")
+                    time.sleep(0.5)
+                    
+                    creds = authenticate()
+                    if not creds:
+                        status.update(label="❌ Authentication failed", state="error")
+                        st.error("""
+**Couldn't connect to Search Console.**
 
-# Display data if loaded
-if st.session_state.gsc_data:
-    data = st.session_state.gsc_data
-    
-    st.markdown("---")
-    st.header("Summary Statistics")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Clicks", f"{data['summary']['total_clicks']:,}")
-    with col2:
-        st.metric("Total Impressions", f"{data['summary']['total_impressions']:,}")
-    with col3:
-        st.metric("Average Position", f"{data['summary']['avg_position']:.2f}")
-    with col4:
-        st.metric("Average CTR", f"{data['summary']['avg_ctr']:.2%}")
-    
-    st.caption(f"Data for: {data['domain']} | Date range: {data['date_range']}")
-    st.caption(f"Queries: {data['summary']['query_count']:,} | Pages: {data['summary']['page_count']:,}")
-    
-    # Raw data in expandable sections
-    st.markdown("---")
-    
-    with st.expander("📊 Queries Data (Click to expand)", expanded=False):
-        if data['queries']:
-            queries_df = pd.DataFrame(data['queries'])
-            queries_df = queries_df.sort_values('clicks', ascending=False)
-            st.dataframe(queries_df, use_container_width=True, height=400)
-        else:
-            st.info("No query data available")
-    
-    with st.expander("📄 Pages Data (Click to expand)", expanded=False):
-        if data['pages']:
-            pages_df = pd.DataFrame(data['pages'])
-            pages_df = pages_df.sort_values('clicks', ascending=False)
-            st.dataframe(pages_df, use_container_width=True, height=400)
-        else:
-            st.info("No page data available")
-    
-    # Chat interface
-    st.markdown("---")
-    st.header("💬 Ask Questions About Your GSC Data")
-    
-    if not st.session_state.claude_api_key:
-        st.warning("⚠️ Please set ANTHROPIC_API_KEY in your .env file to use the chat feature.")
-    else:
-        # Display chat history
-        for i, message in enumerate(st.session_state.chat_history):
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-        
-        # Chat input
-        user_question = st.chat_input("Ask a question about your GSC data...")
-        
-        if user_question:
-            # Add user message to chat
-            st.session_state.chat_history.append({
-                "role": "user",
-                "content": user_question
-            })
-            
-            # Display user message
-            with st.chat_message("user"):
-                st.markdown(user_question)
-            
-            # Get response from Claude
-            with st.spinner("Analyzing data..."):
-                response, was_cut_off = call_claude_api(
-                    st.session_state.claude_api_key,
-                    st.session_state.chat_history,
-                    data
-                )
-            
-            # Add assistant response to chat
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": response
-            })
-            
-            # Store if response was cut off for continue functionality
-            st.session_state.last_response_cut_off = was_cut_off
-            st.session_state.last_response_text = response
-            
-            # Display assistant response
-            with st.chat_message("assistant"):
-                st.markdown(response)
-                if was_cut_off:
-                    st.info("⚠️ Response may have been cut off due to length limit.")
-        
-        # Continue button if last response was cut off
-        if st.session_state.last_response_cut_off and st.session_state.chat_history:
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if st.button("🔄 Continue", key="continue_button", type="secondary"):
-                    # Prepare continue message with previous response as context
-                    continue_message = f"Continue from where you left off. Previous response: {st.session_state.last_response_text}"
-                    
-                    # Create a copy of chat history for the API call (without the continue message)
-                    api_chat_history = st.session_state.chat_history.copy()
-                    api_chat_history.append({
-                        "role": "user",
-                        "content": continue_message
-                    })
-                    
-                    # Get continuation from Claude
-                    with st.spinner("Continuing response..."):
-                        continuation, was_cut_off = call_claude_api(
-                            st.session_state.claude_api_key,
-                            api_chat_history,
-                            data
-                        )
-                    
-                    # Append continuation to last assistant message
-                    last_assistant_idx = None
-                    for i in range(len(st.session_state.chat_history) - 1, -1, -1):
-                        if st.session_state.chat_history[i]["role"] == "assistant":
-                            last_assistant_idx = i
-                            break
-                    
-                    if last_assistant_idx is not None:
-                        st.session_state.chat_history[last_assistant_idx]["content"] += "\n\n" + continuation
-                        st.session_state.last_response_text = st.session_state.chat_history[last_assistant_idx]["content"]
-                        st.session_state.last_response_cut_off = was_cut_off
+For local development, you need to set up credentials in one of these ways:
+
+**Option 1: Create `.streamlit/secrets.toml` file**
+```
+[GOOGLE_SERVICE_ACCOUNT]
+type = "service_account"
+project_id = "your-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+client_email = "your-service-account@project.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/..."
+```
+
+**Option 2: Place `service_account.json` file in the project directory**
+
+Make sure the service account has been granted access to your Search Console property.
+                        """)
                     else:
-                        # If no assistant message found, add as new
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "content": continuation
-                        })
-                        st.session_state.last_response_text = continuation
-                        st.session_state.last_response_cut_off = was_cut_off
-                    
-                    st.rerun()
+                        service = build(API_SERVICE_NAME, API_VERSION, credentials=creds)
+                        
+                        status.update(label="Pulling your data...", state="running")
+                        time.sleep(0.5)
+                        
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=90)
+                        start_str = start_date.strftime('%Y-%m-%d')
+                        end_str = end_date.strftime('%Y-%m-%d')
+                        
+                        status.update(label="Analyzing opportunities...", state="running")
+                        time.sleep(0.5)
+                        
+                        query_rows = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
+                        query_data = format_data(query_rows, ['query'])
+                        
+                        page_rows = fetch_gsc_data(service, domain_input, start_str, end_str, ['page'])
+                        page_data = format_data(page_rows, ['page'])
+                        
+                        status.update(label="Ranking by ROI potential...", state="running")
+                        time.sleep(0.5)
+                        
+                        st.session_state.gsc_data = {
+                            'queries': query_data,
+                            'pages': page_data,
+                            'domain': domain_input,
+                            'date_range': f"{start_str} to {end_str}"
+                        }
+                        
+                        status.update(label="Done! Found opportunities.", state="complete")
+                        st.rerun()
+    else:
+        # Opportunities table
+        st.markdown("### TOP 25 CONTENT OPPORTUNITIES")
+        st.markdown("<span style='color: #6B7280;'>Ranked by ROI potential based on your GSC data</span>", unsafe_allow_html=True)
         
-        # Clear chat button
-        if st.session_state.chat_history:
-            if st.button("Clear Chat History"):
-                st.session_state.chat_history = []
-                st.session_state.last_response_cut_off = False
-                st.session_state.last_response_text = ''
+        opportunities = prepare_opportunities(st.session_state.gsc_data)
+        
+        if not opportunities:
+            st.info("No opportunities found. Try pulling data for a different domain.")
+        else:
+            # Selection controls
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                selected_count = len(st.session_state.selected_opportunities)
+                st.markdown(f"**Selected: {selected_count} of {len(opportunities)}**")
+            with col2:
+                if st.button("Select Top 10", use_container_width=True):
+                    top_10_ids = [opp['id'] for opp in opportunities[:10]]
+                    st.session_state.selected_opportunities = set(top_10_ids)
+                    st.rerun()
+            with col3:
+                if st.button("Generate Selected", type="primary", use_container_width=True, disabled=selected_count == 0):
+                    selected_opps = [
+                        opp for opp in opportunities 
+                        if opp['id'] in st.session_state.selected_opportunities
+                    ]
+                    st.session_state.pending_generation = selected_opps
+                    st.session_state.show_confirm_modal = True
+                    st.rerun()
+            
+            st.markdown("---")
+            
+            # Table header
+            header_cols = st.columns([0.5, 1, 2, 1.5, 1.5, 1, 1, 1])
+            with header_cols[0]:
+                st.markdown("")
+            with header_cols[1]:
+                st.markdown("**#**")
+            with header_cols[2]:
+                st.markdown("**Type | Keyword/Page**")
+            with header_cols[3]:
+                st.markdown("**Position**")
+            with header_cols[4]:
+                st.markdown("**Impressions**")
+            with header_cols[5]:
+                st.markdown("**CTR**")
+            with header_cols[6]:
+                st.markdown("**Score**")
+            with header_cols[7]:
+                st.markdown("**Action**")
+            
+            st.markdown("---")
+            
+            # Opportunities table
+            for idx, opp in enumerate(opportunities, 1):
+                is_selected = opp['id'] in st.session_state.selected_opportunities
+                is_expanded = st.session_state.expanded_opportunity == opp['id']
+                
+                # Row container
+                row_style = "background-color: #F3E8FF; padding: 12px; border-radius: 6px; margin-bottom: 8px;" if is_selected else "padding: 12px; border: 1px solid #E5E7EB; border-radius: 6px; margin-bottom: 8px;"
+                
+                with st.container():
+                    cols = st.columns([0.5, 1, 2, 1.5, 1.5, 1, 1, 1])
+                    
+                    with cols[0]:
+                        checkbox_key = f"select_{opp['id']}"
+                        checkbox_value = st.checkbox("", value=is_selected, key=checkbox_key, label_visibility="collapsed")
+                        if checkbox_value != is_selected:
+                            if checkbox_value:
+                                st.session_state.selected_opportunities.add(opp['id'])
+                            else:
+                                st.session_state.selected_opportunities.discard(opp['id'])
+                            st.rerun()
+                    
+                    with cols[1]:
+                        st.markdown(f"**{idx}**")
+                    
+                    with cols[2]:
+                        badge_class = "badge-new" if opp['type'] == 'NEW' else "badge-refresh"
+                        badge_text = "NEW" if opp['type'] == 'NEW' else "REFRESH"
+                        badge_color = "#10B981" if opp['type'] == 'NEW' else "#F59E0B"
+                        st.markdown(f"<span style='background-color: {badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;'>{badge_text}</span>", unsafe_allow_html=True)
+                        keyword_display = opp['keyword'][:40] + "..." if len(opp['keyword']) > 40 else opp['keyword']
+                        st.markdown(f"<span style='margin-left: 8px;'>{keyword_display}</span>", unsafe_allow_html=True)
+                    
+                    with cols[3]:
+                        pos = opp['position']
+                        st.markdown(f"{pos:.1f}" if pos > 0 else "--")
+                    
+                    with cols[4]:
+                        imp = opp['impressions']
+                        imp_str = f"{imp/1000:.1f}K" if imp >= 1000 else str(int(imp))
+                        st.markdown(imp_str)
+                    
+                    with cols[5]:
+                        st.markdown(f"{opp['ctr']:.1%}")
+                    
+                    with cols[6]:
+                        st.markdown(f"**{opp['score']}**")
+                    
+                    with cols[7]:
+                        expand_key = f"expand_{opp['id']}"
+                        if st.button("View", key=expand_key, use_container_width=True):
+                            if st.session_state.expanded_opportunity == opp['id']:
+                                st.session_state.expanded_opportunity = None
+                            else:
+                                st.session_state.expanded_opportunity = opp['id']
+                            st.rerun()
+                
+                # Expanded details
+                if is_expanded:
+                    with st.expander("", expanded=True):
+                        st.markdown("#### WHY THIS OPPORTUNITY?")
+                        
+                        # Generate analysis
+                        why, approach = generate_opportunity_analysis(
+                            st.session_state.claude_api_key,
+                            opp
+                        )
+                        
+                        st.markdown(why)
+                        st.markdown("---")
+                        st.markdown("#### RECOMMENDED APPROACH")
+                        st.markdown(approach)
+                        st.markdown("---")
+                        
+                        st.markdown(f"**Target Keyword:** {opp['keyword']}")
+                        if opp.get('page'):
+                            st.markdown(f"**Current URL:** {opp['page']} [Open ↗]({opp['page']})")
+                        else:
+                            st.markdown("**Current URL:** New page needed")
+                        
+                        st.markdown("---")
+                        st.text_area("Edit Brief (optional):", key=f"brief_{opp['id']}", height=100)
+
+# ============================================================================
+# TAB 2: GENERATED CONTENT
+# ============================================================================
+
+with tab2:
+    st.markdown("### GENERATED CONTENT")
+    st.markdown("<span style='color: #6B7280;'>Your previously generated articles</span>", unsafe_allow_html=True)
+    
+    if not st.session_state.generated_content:
+        st.markdown("""
+        <div style='text-align: center; padding: 60px 20px;'>
+            <div style='font-size: 48px; margin-bottom: 20px;'>📝</div>
+            <h3 style='color: #1A1A1A; margin-bottom: 10px;'>No content generated yet</h3>
+            <p style='color: #6B7280; margin-bottom: 30px;'>Select opportunities and generate your first article</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if st.button("Go to Opportunities", type="primary", use_container_width=True):
+            st.session_state.current_tab = 'opportunities'
+            st.rerun()
+    else:
+        # Content list
+        for content in st.session_state.generated_content:
+            with st.expander(f"{content['title']} | {content['type']} | {content['date']}", expanded=False):
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    status_idx = 0 if content.get('status') == 'Draft' else 1
+                    new_status = st.selectbox("Status", ["Draft", "Sent"], key=f"status_{content['id']}", index=status_idx)
+                    if new_status != content.get('status'):
+                        content['status'] = new_status
+                with col2:
+                    col2a, col2b = st.columns(2)
+                    with col2a:
+                        if st.button("📋 Copy", key=f"copy_{content['id']}", use_container_width=True):
+                            st.session_state[f"show_copy_{content['id']}"] = True
+                    
+                    if st.session_state.get(f"show_copy_{content['id']}", False):
+                        full_content = f"{content['title_tag']}\n\n{content['meta_description']}\n\n{content['content']}"
+                        st.text_area("Copy this content:", value=full_content, height=200, key=f"copy_area_{content['id']}")
+                        st.info("Select all (Cmd/Ctrl+A) and copy (Cmd/Ctrl+C) to copy the content")
+                    with col2b:
+                        if st.button("🔄 Redo", key=f"redo_{content['id']}", use_container_width=True):
+                            st.info("Redo functionality coming soon")
+                
+                st.markdown("**TITLE TAG**")
+                st.code(content['title_tag'], language=None)
+                
+                st.markdown("**META DESCRIPTION**")
+                st.code(content['meta_description'], language=None)
+                
+                st.markdown("**ARTICLE CONTENT**")
+                st.code(content['content'], language='html')
+
+# ============================================================================
+# CONFIRMATION MODAL
+# ============================================================================
+
+if st.session_state.show_confirm_modal and st.session_state.pending_generation:
+    st.markdown("---")
+    with st.container():
+        st.markdown("### Generate articles?")
+        st.markdown(f"This will create content for **{len(st.session_state.pending_generation)}** article(s):")
+        
+        for opp in st.session_state.pending_generation:
+            badge_text = "Refresh" if opp['type'] == 'REFRESH' else "New"
+            badge_color = "#F59E0B" if opp['type'] == 'REFRESH' else "#10B981"
+            st.markdown(f"• {opp['keyword']} <span style='background-color: {badge_color}; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px;'>{badge_text}</span>", unsafe_allow_html=True)
+        
+        st.markdown(f"\n**Estimated time:** ~{len(st.session_state.pending_generation) * 2}-{len(st.session_state.pending_generation) * 3} minutes")
+        
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.show_confirm_modal = False
+                st.session_state.pending_generation = None
+                st.rerun()
+        with col2:
+            if st.button("Generate", type="primary", use_container_width=True):
+                st.session_state.generation_queue = st.session_state.pending_generation
+                st.session_state.generation_in_progress = True
+                st.session_state.show_confirm_modal = False
+                st.session_state.pending_generation = None
+                st.session_state.current_tab = 'generated'
                 st.rerun()
 
-else:
-    st.info("👆 Enter a domain and click 'Pull GSC Data' to get started")
+# ============================================================================
+# GENERATION PROGRESS (if in progress)
+# ============================================================================
+
+if st.session_state.generation_in_progress and st.session_state.generation_queue:
+    st.markdown("---")
+    st.markdown("### GENERATING CONTENT")
+    
+    total = len(st.session_state.generation_queue)
+    completed = len([s for s in st.session_state.generation_status.values() if s == 'completed'])
+    current_idx = completed
+    
+    progress = completed / total if total > 0 else 0
+    st.progress(progress)
+    st.markdown(f"**{completed} of {total}** ({int(progress * 100)}%)")
+    
+    for idx, opp in enumerate(st.session_state.generation_queue):
+        status = st.session_state.generation_status.get(opp['id'], 'pending')
+        
+        if status == 'completed':
+            st.markdown(f"✓ {opp['keyword']}")
+            st.caption("Done! Ready to review.")
+        elif status == 'generating':
+            st.markdown(f"◆ {opp['keyword']}")
+            current_msg = st.session_state.generation_status.get(f"{opp['id']}_msg", "Crafting content...")
+            st.caption(current_msg)
+        else:
+            st.markdown(f"○ {opp['keyword']}")
+    
+    # Process generation sequentially
+    if current_idx < total:
+        current_opp = st.session_state.generation_queue[current_idx]
+        status = st.session_state.generation_status.get(current_opp['id'], 'pending')
+        
+        if status == 'pending':
+            # Start generating this one
+            st.session_state.generation_status[current_opp['id']] = 'generating'
+            st.session_state.generation_status[f"{current_opp['id']}_msg"] = "Analyzing search intent..."
+            st.rerun()
+        elif status == 'generating':
+            # Check if we've already started generating (to avoid multiple calls)
+            if f"{current_opp['id']}_started" not in st.session_state.generation_status:
+                # Mark as started
+                st.session_state.generation_status[f"{current_opp['id']}_started"] = True
+                st.session_state.generation_status[f"{current_opp['id']}_msg"] = "Analyzing search intent..."
+                st.rerun()
+            else:
+                # Generate content (this will take time)
+                st.session_state.generation_status[f"{current_opp['id']}_msg"] = "Crafting compelling intro..."
+                brief = generate_content_brief(current_opp)
+                content_data, error = call_claude_for_content(st.session_state.claude_api_key, brief)
+                
+                if content_data and not error:
+                    # Save generated content
+                    new_content = {
+                        'id': f"content_{len(st.session_state.generated_content)}",
+                        'title': current_opp['keyword'],
+                        'type': current_opp['type'],
+                        'date': datetime.now().strftime("%b %d, %Y"),
+                        'status': 'Draft',
+                        'title_tag': content_data.get('title_tag', current_opp['keyword']),
+                        'meta_description': content_data.get('meta_description', ''),
+                        'content': content_data.get('content', '')
+                    }
+                    st.session_state.generated_content.append(new_content)
+                    st.session_state.generation_status[current_opp['id']] = 'completed'
+                    # Clean up
+                    if f"{current_opp['id']}_started" in st.session_state.generation_status:
+                        del st.session_state.generation_status[f"{current_opp['id']}_started"]
+                else:
+                    st.session_state.generation_status[current_opp['id']] = 'error'
+                    st.session_state.generation_status[f"{current_opp['id']}_error"] = error or "Generation failed"
+                    # Clean up
+                    if f"{current_opp['id']}_started" in st.session_state.generation_status:
+                        del st.session_state.generation_status[f"{current_opp['id']}_started"]
+                
+                st.rerun()
+        elif status == 'error':
+            # Show error with retry option
+            error_msg = st.session_state.generation_status.get(f"{current_opp['id']}_error", "Generation failed")
+            st.markdown(f"✗ {current_opp['keyword']}")
+            st.caption(f"Error: {error_msg}")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Retry", key=f"retry_{current_opp['id']}"):
+                    st.session_state.generation_status[current_opp['id']] = 'pending'
+                    st.rerun()
+            with col2:
+                if st.button("Skip", key=f"skip_{current_opp['id']}"):
+                    st.session_state.generation_status[current_opp['id']] = 'skipped'
+                    st.rerun()
+    else:
+        # All done
+        st.session_state.generation_in_progress = False
+        st.session_state.generation_queue = []
+        st.session_state.generation_status = {}
+        st.success("✅ All content generated!")
+        time.sleep(2)
+        st.rerun()
+
+# ============================================================================
+# CHAT SECTION (Fixed at bottom)
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 💬 Ask anything or request changes")
+
+# Display chat history
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Chat input
+user_input = st.chat_input("Type your message...")
+
+if user_input:
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    
+    # Call Claude for chat response
+    if st.session_state.claude_api_key:
+        try:
+            client = Anthropic(api_key=st.session_state.claude_api_key)
+            
+            # Build context from generated content
+            context = ""
+            if st.session_state.generated_content:
+                context = "\n\nGenerated Content:\n"
+                for content in st.session_state.generated_content[-5:]:  # Last 5 items
+                    context += f"- {content['title']} ({content['type']})\n"
+            
+            messages = [{"role": "user", "content": user_input + context}]
+            
+            response_obj = client.messages.create(
+                model="claude-opus-4-5-20251101",
+                max_tokens=4000,
+                messages=messages
+            )
+            response = response_obj.content[0].text
+        except Exception as e:
+            response = f"Error: {str(e)}"
+    else:
+        response = "Please configure your Claude API key to use chat."
+    
+    st.session_state.chat_history.append({"role": "assistant", "content": response})
+    st.rerun()
