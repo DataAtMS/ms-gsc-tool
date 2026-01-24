@@ -1,0 +1,35 @@
+# Google API credentials (NEVER commit these!)
+credentials.json
+token.pickle
+
+# Environment variables (NEVER commit these!)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Output files (optional - remove if you want to track these)
+*.json
+*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
