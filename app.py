@@ -55,6 +55,8 @@ if 'show_confirm_modal' not in st.session_state:
     st.session_state.show_confirm_modal = False
 if 'pending_generation' not in st.session_state:
     st.session_state.pending_generation = None
+if 'current_article' not in st.session_state:
+    st.session_state.current_article = None  # Track which article is being worked on
 
 # ============================================================================
 # AUTHENTICATION & DATA FETCHING (PRESERVED)
@@ -64,12 +66,14 @@ def authenticate():
     """Authenticate with Google Search Console API using Service Account."""
     service_account_info = None
     error_msg = None
+    credential_source = None
     
     try:
         if 'GOOGLE_SERVICE_ACCOUNT' in st.secrets:
             service_account_info = st.secrets['GOOGLE_SERVICE_ACCOUNT']
             if not isinstance(service_account_info, dict):
                 service_account_info = dict(service_account_info)
+            credential_source = "Streamlit secrets"
     except Exception as e:
         error_msg = f"Error reading secrets: {str(e)}"
         service_account_info = None
@@ -79,6 +83,7 @@ def authenticate():
             try:
                 with open('service_account.json', 'r') as f:
                     service_account_info = json.load(f)
+                credential_source = "service_account.json file"
             except Exception as e:
                 error_msg = f"Error reading service_account.json: {str(e)}"
         else:
@@ -92,6 +97,17 @@ def authenticate():
             service_account_info,
             scopes=SCOPES
         )
+        
+        # Get the service account email for verification
+        sa_email = service_account_info.get('client_email', 'unknown')
+        
+        # Store credential info in session state for debugging
+        if 'credential_info' not in st.session_state:
+            st.session_state.credential_info = {
+                'source': credential_source,
+                'email': sa_email
+            }
+        
         return creds, None
     except Exception as e:
         return None, f"Error creating credentials: {str(e)}"
@@ -113,20 +129,25 @@ def fetch_gsc_data(service, site_url, start_date, end_date, dimensions):
         return rows, None
     except Exception as e:
         error_str = str(e)
+        error_type = type(e).__name__
+        
+        # Get service account email if possible
+        sa_email = "gsc-reader@gsc-api-v1-485110.iam.gserviceaccount.com"
+        try:
+            if hasattr(service, '_http') and hasattr(service._http, 'credentials'):
+                sa_email = getattr(service._http.credentials, 'service_account_email', sa_email)
+        except:
+            pass
+        
         # Provide more helpful error messages
-        if "403" in error_str or "permission" in error_str.lower():
-            # Try to get service account email from credentials
-            sa_email = "your-service-account@project.iam.gserviceaccount.com"
-            try:
-                if hasattr(service, '_http') and hasattr(service._http, 'credentials'):
-                    sa_email = getattr(service._http.credentials, 'service_account_email', sa_email)
-            except:
-                pass
-            return [], f"Permission denied. Service account '{sa_email}' needs to be added as a user in Google Search Console for property: {site_url}"
+        if "403" in error_str or "permission" in error_str.lower() or "forbidden" in error_str.lower():
+            return [], f"Permission denied (403). Service account '{sa_email}' needs to be added as a user in Google Search Console for property: {site_url}\n\nFull error: {error_str}"
         elif "404" in error_str or "not found" in error_str.lower():
-            return [], f"Property not found: {site_url}. Check that the domain format is correct (e.g., 'sc-domain:example.com' or 'https://example.com/')"
+            return [], f"Property not found (404): {site_url}\n\nThis property doesn't exist or the format is incorrect. Try:\n- 'sc-domain:heatmap.com' (for domain properties)\n- 'https://heatmap.com/' (for URL prefix properties)\n\nFull error: {error_str}"
+        elif "400" in error_str or "bad request" in error_str.lower():
+            return [], f"Bad request (400): Invalid parameters for {site_url}\n\nPossible issues:\n- Date range is invalid\n- Property format is incorrect\n- API request malformed\n\nFull error: {error_str}"
         else:
-            return [], f"Error fetching data: {error_str}"
+            return [], f"Error fetching data ({error_type}): {error_str}\n\nTroubleshooting:\n1. Verify property format matches Search Console exactly\n2. Check service account has access to this property\n3. Ensure date range is valid (last 90 days)\n4. Try refreshing and pulling data again"
 
 def format_data(rows, dimensions):
     """Format API response into readable data."""
@@ -172,6 +193,29 @@ def scrape_page_content(url):
             meta_desc = soup.find('meta', attrs={'property': 'og:description'})
         meta_description = meta_desc.get('content', '').strip() if meta_desc else None
         
+        # Extract meta keywords
+        meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
+        meta_keywords = meta_keywords.get('content', '').strip() if meta_keywords else None
+        
+        # Extract Open Graph tags
+        og_title = soup.find('meta', attrs={'property': 'og:title'})
+        og_title = og_title.get('content', '').strip() if og_title else None
+        og_image = soup.find('meta', attrs={'property': 'og:image'})
+        og_image = og_image.get('content', '').strip() if og_image else None
+        
+        # Extract canonical URL
+        canonical = soup.find('link', attrs={'rel': 'canonical'})
+        canonical_url = canonical.get('href', '') if canonical else None
+        
+        # Extract schema.org structured data
+        schema_data = []
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                schema_json = json.loads(script.string)
+                schema_data.append(schema_json)
+            except:
+                pass
+        
         # Extract H1
         h1_tag = soup.find('h1')
         h1 = h1_tag.get_text(strip=True) if h1_tag else None
@@ -209,9 +253,14 @@ def scrape_page_content(url):
             'url': url,
             'title': title,
             'meta_description': meta_description,
+            'meta_keywords': meta_keywords,
+            'og_title': og_title,
+            'og_image': og_image,
+            'canonical_url': canonical_url,
             'h1': h1,
             'headings': headings,
             'body_text': body_text,
+            'schema_data': schema_data,
             'scraped_at': datetime.now().isoformat(),
             'status': 'success'
         }
@@ -655,19 +704,26 @@ with tab1:
                     if not creds:
                         status.update(label="❌ Authentication failed", state="error")
                         error_details = auth_error or "Unknown authentication error"
+                        
+                        # Show which credentials are being used
+                        cred_info = st.session_state.get('credential_info', {})
+                        cred_source = cred_info.get('source', 'Unknown')
+                        cred_email = cred_info.get('email', 'Unknown')
+                        
                         st.error(f"""
 **Couldn't connect to Search Console.**
 
 **Error:** {error_details}
 
+**Credential Source:** {cred_source}
+**Service Account Email:** {cred_email}
+
 **For local development:**
-1. Create `.streamlit/secrets.toml` with your `[GOOGLE_SERVICE_ACCOUNT]` credentials, OR
-2. Place `service_account.json` file in the project directory
+1. Check `.streamlit/secrets.toml` - make sure it has the SAME credentials as Streamlit Cloud
+2. Verify the `client_email` in secrets matches: `gsc-reader@gsc-api-v1-485110.iam.gserviceaccount.com`
+3. If using `service_account.json`, make sure it's the same file
 
-**For Streamlit Cloud:**
-Add `GOOGLE_SERVICE_ACCOUNT` to your app's secrets.
-
-**Important:** Make sure the service account email has been granted access to your Search Console property.
+**Important:** The service account email must match exactly. If your local secrets have different credentials than Streamlit Cloud, that's why it works in one place but not the other.
                         """)
                     else:
                         service = build(API_SERVICE_NAME, API_VERSION, credentials=creds)
@@ -680,6 +736,28 @@ Add `GOOGLE_SERVICE_ACCOUNT` to your app's secrets.
                         start_str = start_date.strftime('%Y-%m-%d')
                         end_str = end_date.strftime('%Y-%m-%d')
                         
+                        # Show which service account is being used
+                        try:
+                            sa_email = creds.service_account_email
+                            st.info(f"🔐 Using service account: `{sa_email}`")
+                        except:
+                            pass
+                        
+                        # List available sites BEFORE trying to fetch
+                        try:
+                            sites_list = service.sites().list().execute()
+                            available_sites = [site.get('siteUrl', '') for site in sites_list.get('siteEntry', [])]
+                            if available_sites:
+                                st.info(f"""
+**Available properties for this service account:**
+{chr(10).join(f"- `{site}`" for site in available_sites[:15])}
+
+**You're trying:** `{domain_input}`
+**Match found:** {'✅ Yes' if domain_input in available_sites else '❌ No - Use one of the formats above'}
+                                """)
+                        except Exception as list_error:
+                            st.warning(f"Could not list available sites: {str(list_error)}")
+                        
                         status.update(label="Fetching query data...", state="running")
                         query_rows, query_error = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
                         
@@ -691,22 +769,17 @@ Add `GOOGLE_SERVICE_ACCOUNT` to your app's secrets.
                             st.markdown("""
                             **Troubleshooting Steps:**
                             
-                            1. **Verify the property format in Search Console:**
-                               - Go to [Search Console](https://search.google.com/search-console)
-                               - Check if your property shows as `https://heatmap.com/` or `sc-domain:heatmap.com`
-                               - Use the EXACT format shown in Search Console
+                            1. **Check the available properties above** - Use the EXACT format shown
                             
-                            2. **Check service account is added to THIS property:**
-                               - In Search Console, select the property: `https://heatmap.com/`
+                            2. **Verify service account is added to THIS property:**
+                               - In Search Console, select the property
                                - Go to Settings → Users and permissions
                                - Verify `gsc-reader@gsc-api-v1-485110.iam.gserviceaccount.com` is listed
                                - If not, add it with "Full" access
                             
-                            3. **Try the alternative format:**
-                               - If using `https://heatmap.com/`, try `sc-domain:heatmap.com`
-                               - If using `sc-domain:heatmap.com`, try `https://heatmap.com/`
+                            3. **Wait 2-5 minutes** after adding the service account (permissions need time to propagate)
                             
-                            4. **Wait a few minutes** after adding the service account (permissions can take 2-5 minutes to propagate)
+                            4. **Check the full error message above** for specific details
                             """)
                             st.stop()
                         
@@ -1089,6 +1162,11 @@ if st.session_state.generation_in_progress and st.session_state.generation_queue
 st.markdown("---")
 st.markdown("### 💬 Ask anything or request changes")
 
+# Show current article being worked on
+if st.session_state.current_article:
+    current = st.session_state.current_article
+    st.info(f"📝 **Currently working on:** {current.get('title', 'Unknown')} - {current.get('url', '')}")
+
 # Display chat history
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
@@ -1105,6 +1183,94 @@ if user_input:
         try:
             client = Anthropic(api_key=st.session_state.claude_api_key)
             
+            # Function to match semantic article names to scraped pages
+            def find_article_by_name(name, scraped_pages):
+                """Match semantic article name to a scraped page."""
+                if not scraped_pages:
+                    return None
+                
+                name_lower = name.lower()
+                best_match = None
+                best_score = 0
+                
+                for page in scraped_pages:
+                    if page.get('status') != 'success':
+                        continue
+                    
+                    # Check title
+                    title = (page.get('title') or '').lower()
+                    h1 = (page.get('h1') or '').lower()
+                    url = (page.get('url') or '').lower()
+                    
+                    # Score based on keyword matches
+                    score = 0
+                    name_words = name_lower.split()
+                    
+                    for word in name_words:
+                        if word in title:
+                            score += 3
+                        if word in h1:
+                            score += 2
+                        if word in url:
+                            score += 1
+                    
+                    # Exact match bonus
+                    if name_lower in title or name_lower in h1:
+                        score += 10
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = page
+                
+                return best_match if best_score > 0 else None
+            
+            # Check if user is asking about a specific article
+            current_article = st.session_state.current_article
+            article_mentioned = None
+            
+            # Try to find article by semantic name or URL in user input
+            if st.session_state.gsc_data and st.session_state.gsc_data.get('scraped_pages'):
+                scraped_pages = st.session_state.gsc_data.get('scraped_pages', [])
+                
+                # Check for URL in input
+                for page in scraped_pages:
+                    if page.get('url') and page.get('url') in user_input:
+                        article_mentioned = page
+                        break
+                
+                # If no URL match, try semantic matching
+                if not article_mentioned:
+                    # Look for common patterns like "PU leather guide", "rewrite the article about X"
+                    rewrite_keywords = ['rewrite', 'edit', 'update', 'improve', 'article about', 'guide', 'post']
+                    if any(keyword in user_input.lower() for keyword in rewrite_keywords):
+                        # Extract potential article name
+                        # Simple extraction - look for phrases after keywords
+                        for keyword in ['about', 'guide', 'article', 'the']:
+                            if keyword in user_input.lower():
+                                parts = user_input.lower().split(keyword, 1)
+                                if len(parts) > 1:
+                                    potential_name = parts[1].strip().split('.')[0].split('?')[0].strip()
+                                    if len(potential_name) > 3:  # Only if meaningful
+                                        article_mentioned = find_article_by_name(potential_name, scraped_pages)
+                                        if article_mentioned:
+                                            break
+                
+                # If still no match but we have a current article, use that
+                if not article_mentioned and current_article:
+                    # Find current article in scraped pages
+                    for page in scraped_pages:
+                        if page.get('url') == current_article.get('url'):
+                            article_mentioned = page
+                            break
+            
+            # Update current article if one was mentioned
+            if article_mentioned:
+                st.session_state.current_article = article_mentioned
+            
+            # Use current article if no new one mentioned
+            if not article_mentioned and current_article:
+                article_mentioned = current_article
+            
             # Build context from GSC data
             context_parts = []
             
@@ -1119,23 +1285,46 @@ if user_input:
                 # Get top performing queries
                 top_queries = sorted(queries, key=lambda x: x.get('clicks', 0), reverse=True)[:20]
                 
-                # Build pages context with scraped content
+                # Build pages context with scraped content (full details for current article, summary for others)
                 pages_context = []
+                current_article_url = article_mentioned.get('url') if article_mentioned else None
+                
                 if scraped_pages:
-                    for page in scraped_pages[:15]:  # Top 15 scraped pages
+                    for page in scraped_pages[:20]:  # Top 20 scraped pages
                         if page.get('status') == 'success':
-                            pages_context.append({
-                                'url': page.get('url'),
-                                'title': page.get('title'),
-                                'meta_description': page.get('meta_description'),
-                                'h1': page.get('h1'),
-                                'headings_count': len(page.get('headings', [])),
-                                'body_preview': page.get('body_text', '')[:500] if page.get('body_text') else None,
-                                'clicks': page.get('clicks', 0),
-                                'impressions': page.get('impressions', 0),
-                                'ctr': page.get('ctr', 0),
-                                'position': page.get('position', 0)
-                            })
+                            # Full details for current article, summary for others
+                            if page.get('url') == current_article_url:
+                                pages_context.append({
+                                    'url': page.get('url'),
+                                    'title': page.get('title'),
+                                    'meta_description': page.get('meta_description'),
+                                    'meta_keywords': page.get('meta_keywords'),
+                                    'og_title': page.get('og_title'),
+                                    'canonical_url': page.get('canonical_url'),
+                                    'h1': page.get('h1'),
+                                    'headings': page.get('headings', []),  # Full headings list
+                                    'body_text': page.get('body_text'),  # Full body text
+                                    'schema_data': page.get('schema_data', []),
+                                    'clicks': page.get('clicks', 0),
+                                    'impressions': page.get('impressions', 0),
+                                    'ctr': page.get('ctr', 0),
+                                    'position': page.get('position', 0),
+                                    'is_current_article': True
+                                })
+                            else:
+                                # Summary for other pages
+                                pages_context.append({
+                                    'url': page.get('url'),
+                                    'title': page.get('title'),
+                                    'meta_description': page.get('meta_description'),
+                                    'h1': page.get('h1'),
+                                    'headings_count': len(page.get('headings', [])),
+                                    'body_preview': page.get('body_text', '')[:300] if page.get('body_text') else None,
+                                    'clicks': page.get('clicks', 0),
+                                    'impressions': page.get('impressions', 0),
+                                    'ctr': page.get('ctr', 0),
+                                    'position': page.get('position', 0)
+                                })
                         else:
                             # Include pages that failed to scrape but have GSC data
                             pages_context.append({
@@ -1152,13 +1341,25 @@ if user_input:
                     top_pages = sorted(pages, key=lambda x: x.get('clicks', 0), reverse=True)[:20]
                     pages_context = top_pages
                 
+                # Add note about current article if one is selected
+                if article_mentioned:
+                    context_parts.append(f"""
+**CURRENT ARTICLE BEING WORKED ON:**
+- URL: {article_mentioned.get('url')}
+- Title: {article_mentioned.get('title')}
+- This is the article you should focus on for rewrites and edits unless the user explicitly mentions a different article.
+""")
+                
+                # Calculate scraped count outside f-string to avoid syntax issues
+                scraped_count = len([p for p in scraped_pages if p.get('status') == 'success'])
+                
                 context_parts.append(f"""
 **Google Search Console Data Context:**
 - Domain: {domain}
 - Date Range: {date_range}
 - Total Queries: {len(queries)}
 - Total Pages: {len(pages)}
-- Pages Scraped: {len([p for p in scraped_pages if p.get('status') == 'success')]}
+- Pages Scraped: {scraped_count}
 
 **Top Performing Queries (by clicks):**
 {json.dumps(top_queries, indent=2) if top_queries else "No query data"}
@@ -1179,23 +1380,49 @@ if user_input:
             context = "\n".join(context_parts) if context_parts else ""
             
             # Create system message
-            system_message = """You are an SEO analyst assistant helping with Google Search Console data analysis and content strategy. 
-You have access to GSC data including queries, pages, clicks, impressions, CTR, and position data.
-You can answer questions about:
-- Top performing content/pages
-- Search query performance
-- Content opportunities
-- SEO recommendations
-- Performance metrics
+            system_message = """You are an SEO content writer and analyst assistant helping with Google Search Console data analysis and article rewrites.
 
-Be specific and reference actual data from the GSC context when available."""
+**IMPORTANT RULES:**
+1. **ONLY rewrite articles that are EXPLICITLY mentioned or requested** - Never rewrite random articles
+2. **Remember the current article** - If user asks follow-up questions about "this article" or "the article", continue working on the last article you were discussing
+3. **Include technical SEO improvements** - When rewriting, explicitly state improvements to meta description, H tags, schema, page title, etc. and include them in the output
+4. **Use full scraped content** - Reference the actual title, meta description, headings, and body text from the scraped page
+
+**For Article Rewrites:**
+- Provide the rewritten content in HTML format
+- Include improved title tag, meta description, H1, and H2-H6 headings
+- Suggest schema markup improvements if applicable
+- Explicitly call out what SEO elements were improved
+- Maintain the core topic and URL target
+- Update outdated information to 2026
+- Improve structure and readability
+
+**Available Data:**
+- GSC traffic metrics (clicks, impressions, CTR, position)
+- Full scraped page content (title, meta, headings, body text)
+- Technical SEO elements (schema, canonical, OG tags)
+
+Be specific and reference actual data from the context when available."""
             
-            # Build messages with context
+            # Build messages with context and conversation history
+            # Include last assistant response if we have a current article (for follow-up edits)
+            messages = []
+            
+            # Add conversation history (last 10 messages to keep context manageable)
+            recent_history = st.session_state.chat_history[-10:] if len(st.session_state.chat_history) > 10 else st.session_state.chat_history
+            
+            for msg in recent_history[:-1]:  # Exclude the current user message we just added
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # Build current message with context
             full_message = user_input
             if context:
                 full_message = f"{context}\n\n**User Question:** {user_input}"
             
-            messages = [{"role": "user", "content": full_message}]
+            messages.append({"role": "user", "content": full_message})
             
             response_obj = client.messages.create(
                 model="claude-opus-4-5-20251101",
