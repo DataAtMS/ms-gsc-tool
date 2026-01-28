@@ -1243,8 +1243,7 @@ if user_input:
     if st.session_state.claude_api_key:
         # Show loading indicator
         with st.spinner("🤔 Claude is thinking..."):
-            try:
-                client = Anthropic(api_key=st.session_state.claude_api_key)
+            client = Anthropic(api_key=st.session_state.claude_api_key)
             
             # Function to match semantic article names to scraped pages
             def find_article_by_name(name, scraped_pages):
@@ -1657,10 +1656,6 @@ REMEMBER: The CURRENT ARTICLE is clearly marked at the top. ALL modification req
                     st.session_state.last_truncated_response = None
                     st.session_state.last_truncated_messages = None
                     st.session_state.last_truncated_system = None
-                    
-            except Exception as e:
-                response = f"Error: {str(e)}"
-                st.session_state.last_truncated_response = None
     else:
         response = "Please configure your Claude API key to use chat."
     
