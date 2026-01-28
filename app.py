@@ -1332,8 +1332,69 @@ if user_input:
             if not article_mentioned and current_article:
                 article_mentioned = current_article
             
+            # For follow-up modification requests, ALWAYS use current article if it exists
+            # Detect modification keywords that should use current article
+            modification_keywords = [
+                'write this', 'rewrite this', 'edit this', 'change this', 'update this',
+                'make it', 'convert this', 'modify this', 'adjust this', 'fix this',
+                'in plain text', 'in html', 'shorter', 'longer', 'different format',
+                'change the', 'update the', 'modify the', 'edit the', 'make the',
+                'this article', 'the article', 'this page', 'the page'
+            ]
+            if (not article_mentioned and current_article and 
+                any(keyword in user_input.lower() for keyword in modification_keywords)):
+                article_mentioned = current_article
+                st.session_state.current_article = current_article  # Ensure it's set
+            
             # Build context from GSC data
             context_parts = []
+            
+            # ALWAYS include current article FIRST and prominently if it exists
+            # This ensures follow-up requests always work on the right article
+            if article_mentioned or current_article:
+                working_article = article_mentioned if article_mentioned else current_article
+                
+                if working_article and working_article.get('status') == 'success':
+                    # Include FULL current article content at the top
+                    context_parts.append(f"""
+================================================================================
+🚨 CRITICAL: YOU ARE CURRENTLY WORKING ON THIS ARTICLE - ALL REQUESTS APPLY TO THIS ARTICLE ONLY
+================================================================================
+
+**CURRENT ARTICLE URL:** {working_article.get('url')}
+**CURRENT ARTICLE TITLE:** {working_article.get('title')}
+
+**FULL ARTICLE CONTENT:**
+- Title Tag: {working_article.get('title')}
+- Meta Description: {working_article.get('meta_description')}
+- H1: {working_article.get('h1')}
+- Canonical URL: {working_article.get('canonical_url')}
+- Meta Keywords: {working_article.get('meta_keywords')}
+- OG Title: {working_article.get('og_title')}
+
+**HEADINGS STRUCTURE:**
+{json.dumps(working_article.get('headings', []), indent=2) if working_article.get('headings') else 'No headings found'}
+
+**FULL BODY TEXT:**
+{working_article.get('body_text', 'No body text available')}
+
+**GSC METRICS:**
+- Clicks: {working_article.get('clicks', 0)}
+- Impressions: {working_article.get('impressions', 0)}
+- CTR: {working_article.get('ctr', 0):.2%}
+- Position: {working_article.get('position', 0):.1f}
+
+**SCHEMA DATA:**
+{json.dumps(working_article.get('schema_data', []), indent=2) if working_article.get('schema_data') else 'No schema data'}
+
+================================================================================
+⚠️ IMPORTANT: When the user asks to modify, rewrite, edit, or change "this article" 
+or "the article" or makes ANY content-related request, they mean THIS ARTICLE ONLY.
+Do NOT work on any other page, homepage, or article unless they explicitly 
+provide a different URL or article name.
+================================================================================
+
+""")
             
             if st.session_state.gsc_data:
                 gsc_data = st.session_state.gsc_data
@@ -1348,7 +1409,7 @@ if user_input:
                 
                 # Build pages context with scraped content (full details for current article, summary for others)
                 pages_context = []
-                current_article_url = article_mentioned.get('url') if article_mentioned else None
+                current_article_url = (article_mentioned or current_article).get('url') if (article_mentioned or current_article) else None
                 
                 if scraped_pages:
                     for page in scraped_pages[:20]:  # Top 20 scraped pages
@@ -1402,15 +1463,6 @@ if user_input:
                     top_pages = sorted(pages, key=lambda x: x.get('clicks', 0), reverse=True)[:20]
                     pages_context = top_pages
                 
-                # Add note about current article if one is selected
-                if article_mentioned:
-                    context_parts.append(f"""
-**CURRENT ARTICLE BEING WORKED ON:**
-- URL: {article_mentioned.get('url')}
-- Title: {article_mentioned.get('title')}
-- This is the article you should focus on for rewrites and edits unless the user explicitly mentions a different article.
-""")
-                
                 # Calculate scraped count outside f-string to avoid syntax issues
                 scraped_count = len([p for p in scraped_pages if p.get('status') == 'success'])
                 
@@ -1443,27 +1495,45 @@ if user_input:
             # Create system message
             system_message = """You are an SEO content writer and analyst assistant helping with Google Search Console data analysis and article rewrites.
 
-**IMPORTANT RULES:**
-1. **ONLY rewrite articles that are EXPLICITLY mentioned or requested** - Never rewrite random articles
-2. **Remember the current article** - If user asks follow-up questions about "this article" or "the article", continue working on the last article you were discussing
-3. **Include technical SEO improvements** - When rewriting, explicitly state improvements to meta description, H tags, schema, page title, etc. and include them in the output
-4. **Use full scraped content** - Reference the actual title, meta description, headings, and body text from the scraped page
+🚨 CRITICAL RULES - READ CAREFULLY:
 
-**For Article Rewrites:**
-- Provide the rewritten content in HTML format
-- Include improved title tag, meta description, H1, and H2-H6 headings
-- Suggest schema markup improvements if applicable
-- Explicitly call out what SEO elements were improved
-- Maintain the core topic and URL target
-- Update outdated information to 2026
-- Improve structure and readability
+1. **CURRENT ARTICLE IS ALWAYS SPECIFIED ABOVE** - There is a "CURRENT ARTICLE" section at the top of the context with the FULL article content. This is the ONLY article you should work on.
+
+2. **ALL USER REQUESTS APPLY TO THE CURRENT ARTICLE** - When the user says:
+   - "rewrite this"
+   - "write this in plain text"
+   - "make it shorter"
+   - "edit this"
+   - "change the title"
+   - "update this"
+   - ANY modification request
+   They mean the CURRENT ARTICLE shown above. NOT the homepage, NOT a different page, NOT a random article.
+
+3. **NEVER WORK ON OTHER PAGES** - Do NOT rewrite, modify, or work on:
+   - The homepage (/)
+   - Any page not explicitly shown as the CURRENT ARTICLE
+   - Any article the user hasn't explicitly mentioned by name or URL
+   - Random pages from the GSC data
+
+4. **ONLY SWITCH ARTICLES IF EXPLICITLY TOLD** - Only work on a different article if the user:
+   - Provides a specific URL
+   - Names a specific article by title (e.g., "work on the PU leather guide")
+   - Explicitly says "switch to" or "now work on" a different article
+
+5. **FOR ARTICLE MODIFICATIONS:**
+   - Always modify the CURRENT ARTICLE shown above
+   - Include the full content in the requested format (HTML, plain text, etc.)
+   - Maintain the same URL and topic
+   - Include all technical SEO elements (title tag, meta description, headings, etc.)
+   - Explicitly state what was changed
 
 **Available Data:**
+- Current article full content (shown at top of context)
 - GSC traffic metrics (clicks, impressions, CTR, position)
-- Full scraped page content (title, meta, headings, body text)
 - Technical SEO elements (schema, canonical, OG tags)
+- Other pages (for reference only, NOT for modification)
 
-Be specific and reference actual data from the context when available."""
+REMEMBER: The CURRENT ARTICLE is clearly marked at the top. ALL modification requests apply to THAT article only."""
             
             # Build messages with context and conversation history
             # Include last assistant response if we have a current article (for follow-up edits)
