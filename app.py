@@ -1241,8 +1241,10 @@ if user_input:
     
     # Call Claude for chat response
     if st.session_state.claude_api_key:
-        try:
-            client = Anthropic(api_key=st.session_state.claude_api_key)
+        # Show loading indicator
+        with st.spinner("🤔 Claude is thinking..."):
+            try:
+                client = Anthropic(api_key=st.session_state.claude_api_key)
             
             # Function to match semantic article names to scraped pages
             def find_article_by_name(name, scraped_pages):
@@ -1346,6 +1348,17 @@ if user_input:
                 article_mentioned = current_article
                 st.session_state.current_article = current_article  # Ensure it's set
             
+            # Detect if this is a modification request (edit, rewrite, format change, etc.)
+            modification_keywords = [
+                'write this', 'rewrite this', 'edit this', 'change this', 'update this',
+                'make it', 'convert this', 'modify this', 'adjust this', 'fix this',
+                'in plain text', 'in html', 'shorter', 'longer', 'different format',
+                'change the', 'update the', 'modify the', 'edit the', 'make the',
+                'this article', 'the article', 'this page', 'the page', 'plain text',
+                'remove', 'add', 'delete', 'replace'
+            ]
+            is_modification_request = any(keyword in user_input.lower() for keyword in modification_keywords)
+            
             # Build context from GSC data
             context_parts = []
             
@@ -1358,7 +1371,7 @@ if user_input:
                     # Include FULL current article content at the top
                     context_parts.append(f"""
 ================================================================================
-🚨 CRITICAL: YOU ARE CURRENTLY WORKING ON THIS ARTICLE - ALL REQUESTS APPLY TO THIS ARTICLE ONLY
+🚨🚨🚨 CRITICAL: YOU ARE CURRENTLY WORKING ON THIS ARTICLE - ALL REQUESTS APPLY TO THIS ARTICLE ONLY 🚨🚨🚨
 ================================================================================
 
 **CURRENT ARTICLE URL:** {working_article.get('url')}
@@ -1388,15 +1401,27 @@ if user_input:
 {json.dumps(working_article.get('schema_data', []), indent=2) if working_article.get('schema_data') else 'No schema data'}
 
 ================================================================================
-⚠️ IMPORTANT: When the user asks to modify, rewrite, edit, or change "this article" 
-or "the article" or makes ANY content-related request, they mean THIS ARTICLE ONLY.
-Do NOT work on any other page, homepage, or article unless they explicitly 
-provide a different URL or article name.
+⚠️⚠️⚠️ CRITICAL INSTRUCTION: When the user asks to modify, rewrite, edit, or change 
+"this article" or "the article" or makes ANY content-related request, they mean 
+THIS ARTICLE ONLY (the one shown above). 
+
+DO NOT:
+- Work on the homepage (/)
+- Work on any other page
+- Analyze opportunities
+- Suggest other articles
+- Do anything except modify THIS ARTICLE
+
+ONLY modify the article shown above. Nothing else.
 ================================================================================
 
 """)
             
-            if st.session_state.gsc_data:
+            # If we have a current article, we are in CONTENT MODE:
+            # - We have already added full current-article context above
+            # - We should NOT send the full GSC dataset (other pages, queries, etc.)
+            # Only when there is NO current article selected do we send broader GSC context
+            if st.session_state.gsc_data and not (article_mentioned or current_article):
                 gsc_data = st.session_state.gsc_data
                 domain = gsc_data.get('domain', 'unknown')
                 date_range = gsc_data.get('date_range', 'unknown')
@@ -1492,8 +1517,37 @@ provide a different URL or article name.
             # Build full context
             context = "\n".join(context_parts) if context_parts else ""
             
-            # Create system message
-            system_message = """You are an SEO content writer and analyst assistant helping with Google Search Console data analysis and article rewrites.
+            # Create system message - make it EXTREMELY explicit for modification requests
+            if is_modification_request and (article_mentioned or current_article):
+                system_message = """You are a content editor. Your ONLY job is to modify the article shown in the "CURRENT ARTICLE" section above.
+
+🚨🚨🚨 ABSOLUTE RULES - NO EXCEPTIONS 🚨🚨🚨
+
+1. **ONLY MODIFY THE CURRENT ARTICLE** - The article is clearly marked at the top with "CURRENT ARTICLE". This is the ONLY thing you should work on.
+
+2. **DO NOT:**
+   - Analyze opportunities
+   - Suggest other articles
+   - Work on the homepage
+   - Work on any other page
+   - Do anything except modify the CURRENT ARTICLE shown above
+
+3. **WHEN USER ASKS TO MODIFY:**
+   - "write this in plain text" = Convert the CURRENT ARTICLE to plain text
+   - "make it shorter" = Make the CURRENT ARTICLE shorter
+   - "edit this" = Edit the CURRENT ARTICLE
+   - "change the title" = Change the title of the CURRENT ARTICLE
+   - ANY modification = Modify ONLY the CURRENT ARTICLE
+
+4. **YOUR RESPONSE MUST:**
+   - Only contain the modified version of the CURRENT ARTICLE
+   - Not include analysis, suggestions, or other content
+   - Be exactly what the user asked for (plain text, shorter, etc.)
+   - Maintain the same topic and URL as the CURRENT ARTICLE
+
+REMEMBER: There is ONE article shown above. Modify ONLY that article. Nothing else."""
+            else:
+                system_message = """You are an SEO content writer and analyst assistant helping with Google Search Console data analysis and article rewrites.
 
 🚨 CRITICAL RULES - READ CAREFULLY:
 
@@ -1536,22 +1590,39 @@ provide a different URL or article name.
 REMEMBER: The CURRENT ARTICLE is clearly marked at the top. ALL modification requests apply to THAT article only."""
             
             # Build messages with context and conversation history
-            # Include last assistant response if we have a current article (for follow-up edits)
             messages = []
             
-            # Add conversation history (last 10 messages to keep context manageable)
-            recent_history = st.session_state.chat_history[-10:] if len(st.session_state.chat_history) > 10 else st.session_state.chat_history
-            
-            for msg in recent_history[:-1]:  # Exclude the current user message we just added
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
+            # For modification requests, use minimal history to avoid confusion
+            if is_modification_request and (article_mentioned or current_article):
+                # Only include the last 2 messages (user's modification request + previous assistant response if exists)
+                recent_history = st.session_state.chat_history[-2:] if len(st.session_state.chat_history) > 2 else st.session_state.chat_history
+                for msg in recent_history[:-1]:  # Exclude the current user message we just added
+                    messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+            else:
+                # Add conversation history (last 10 messages to keep context manageable)
+                recent_history = st.session_state.chat_history[-10:] if len(st.session_state.chat_history) > 10 else st.session_state.chat_history
+                
+                for msg in recent_history[:-1]:  # Exclude the current user message we just added
+                    messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
             
             # Build current message with context
-            full_message = user_input
-            if context:
-                full_message = f"{context}\n\n**User Question:** {user_input}"
+            # For modification requests, make it EXTREMELY clear
+            if is_modification_request and (article_mentioned or current_article):
+                full_message = f"""{context}
+
+**USER REQUEST:** {user_input}
+
+⚠️⚠️⚠️ REMEMBER: Modify ONLY the CURRENT ARTICLE shown above. Do NOT analyze, do NOT suggest other articles, do NOT work on other pages. Just modify the article as requested."""
+            else:
+                full_message = user_input
+                if context:
+                    full_message = f"{context}\n\n**User Question:** {user_input}"
             
             messages.append({"role": "user", "content": full_message})
             
@@ -1571,25 +1642,25 @@ REMEMBER: The CURRENT ARTICLE is clearly marked at the top. ALL modification req
                 messages=messages
             )
             
-            response = response_obj.content[0].text
-            stop_reason = response_obj.stop_reason
-            
-            # Check if response was truncated (most reliable indicator)
-            is_truncated = stop_reason == "max_tokens"
-            
-            # Store truncation state for Continue button
-            if is_truncated:
-                st.session_state.last_truncated_response = response
-                st.session_state.last_truncated_messages = messages
-                st.session_state.last_truncated_system = system_message
-            else:
-                st.session_state.last_truncated_response = None
-                st.session_state.last_truncated_messages = None
-                st.session_state.last_truncated_system = None
+                response = response_obj.content[0].text
+                stop_reason = response_obj.stop_reason
                 
-        except Exception as e:
-            response = f"Error: {str(e)}"
-            st.session_state.last_truncated_response = None
+                # Check if response was truncated (most reliable indicator)
+                is_truncated = stop_reason == "max_tokens"
+                
+                # Store truncation state for Continue button
+                if is_truncated:
+                    st.session_state.last_truncated_response = response
+                    st.session_state.last_truncated_messages = messages
+                    st.session_state.last_truncated_system = system_message
+                else:
+                    st.session_state.last_truncated_response = None
+                    st.session_state.last_truncated_messages = None
+                    st.session_state.last_truncated_system = None
+                    
+            except Exception as e:
+                response = f"Error: {str(e)}"
+                st.session_state.last_truncated_response = None
     else:
         response = "Please configure your Claude API key to use chat."
     
