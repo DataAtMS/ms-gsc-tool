@@ -1242,7 +1242,7 @@ if user_input:
     # Call Claude for chat response
     if st.session_state.claude_api_key:
         # Show loading indicator
-        with st.spinner("🤔 Claude is thinking..."):
+        with st.spinner("🤔 Thinking like a human... I obviously am"):
             client = Anthropic(api_key=st.session_state.claude_api_key)
             
             # Function to match semantic article names to scraped pages
