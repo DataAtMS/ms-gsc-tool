@@ -1634,13 +1634,14 @@ REMEMBER: The CURRENT ARTICLE is clearly marked at the top. ALL modification req
             # Use higher token limit for article generation (16000), lower for chat (8000)
             token_limit = 16000 if is_article_request else 8000
             
-            response_obj = client.messages.create(
-                model="claude-opus-4-5-20251101",
-                max_tokens=token_limit,
-                system=system_message,
-                messages=messages
-            )
-            
+            try:
+                response_obj = client.messages.create(
+                    model="claude-opus-4-5-20251101",
+                    max_tokens=token_limit,
+                    system=system_message,
+                    messages=messages
+                )
+                
                 response = response_obj.content[0].text
                 stop_reason = response_obj.stop_reason
                 
@@ -1656,6 +1657,9 @@ REMEMBER: The CURRENT ARTICLE is clearly marked at the top. ALL modification req
                     st.session_state.last_truncated_response = None
                     st.session_state.last_truncated_messages = None
                     st.session_state.last_truncated_system = None
+            except Exception as e:
+                response = f"Error: {str(e)}"
+                st.session_state.last_truncated_response = None
     else:
         response = "Please configure your Claude API key to use chat."
     
