@@ -57,6 +57,12 @@ if 'pending_generation' not in st.session_state:
     st.session_state.pending_generation = None
 if 'current_article' not in st.session_state:
     st.session_state.current_article = None  # Track which article is being worked on
+if 'last_truncated_response' not in st.session_state:
+    st.session_state.last_truncated_response = None
+if 'last_truncated_messages' not in st.session_state:
+    st.session_state.last_truncated_messages = None
+if 'last_truncated_system' not in st.session_state:
+    st.session_state.last_truncated_system = None
 
 # ============================================================================
 # AUTHENTICATION & DATA FETCHING (PRESERVED)
@@ -1172,6 +1178,61 @@ for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# Show Continue button if last response was truncated
+if st.session_state.get('last_truncated_response'):
+    # Check if the last assistant message matches the truncated response
+    if (st.session_state.chat_history and 
+        st.session_state.chat_history[-1]["role"] == "assistant" and
+        st.session_state.chat_history[-1]["content"] == st.session_state.last_truncated_response):
+        
+        if st.button("▶️ Continue", key="continue_response"):
+            # Add continue message to chat
+            st.session_state.chat_history.append({
+                "role": "user", 
+                "content": "Continue from where you left off"
+            })
+            
+            # Build continue messages with full context
+            continue_messages = st.session_state.last_truncated_messages.copy()
+            continue_messages.append({
+                "role": "assistant",
+                "content": st.session_state.last_truncated_response
+            })
+            continue_messages.append({
+                "role": "user",
+                "content": "Continue from where you left off"
+            })
+            
+            try:
+                client = Anthropic(api_key=st.session_state.claude_api_key)
+                continue_response_obj = client.messages.create(
+                    model="claude-opus-4-5-20251101",
+                    max_tokens=16000,
+                    system=st.session_state.last_truncated_system,
+                    messages=continue_messages
+                )
+                continue_response = continue_response_obj.content[0].text
+                continue_stop_reason = continue_response_obj.stop_reason
+                
+                # Append to previous response
+                last_assistant_msg = st.session_state.chat_history[-2]
+                last_assistant_msg["content"] += "\n\n" + continue_response
+                
+                # Check if this continuation was also truncated
+                if continue_stop_reason == "max_tokens":
+                    st.session_state.last_truncated_response = last_assistant_msg["content"]
+                    st.session_state.last_truncated_messages = continue_messages
+                else:
+                    # Fully complete - clear truncation state
+                    st.session_state.last_truncated_response = None
+                    st.session_state.last_truncated_messages = None
+                    st.session_state.last_truncated_system = None
+                
+            except Exception as e:
+                st.error(f"Error continuing: {str(e)}")
+            
+            st.rerun()
+
 # Chat input
 user_input = st.chat_input("Type your message...")
 
@@ -1424,15 +1485,41 @@ Be specific and reference actual data from the context when available."""
             
             messages.append({"role": "user", "content": full_message})
             
+            # Detect if user is asking for article generation/rewrite - use higher token limit
+            is_article_request = any(keyword in user_input.lower() for keyword in [
+                'rewrite', 'write', 'generate', 'create', 'article', 'content', 
+                'edit', 'update', 'improve', 'redraft'
+            ])
+            
+            # Use higher token limit for article generation (16000), lower for chat (8000)
+            token_limit = 16000 if is_article_request else 8000
+            
             response_obj = client.messages.create(
                 model="claude-opus-4-5-20251101",
-                max_tokens=4000,
+                max_tokens=token_limit,
                 system=system_message,
                 messages=messages
             )
+            
             response = response_obj.content[0].text
+            stop_reason = response_obj.stop_reason
+            
+            # Check if response was truncated (most reliable indicator)
+            is_truncated = stop_reason == "max_tokens"
+            
+            # Store truncation state for Continue button
+            if is_truncated:
+                st.session_state.last_truncated_response = response
+                st.session_state.last_truncated_messages = messages
+                st.session_state.last_truncated_system = system_message
+            else:
+                st.session_state.last_truncated_response = None
+                st.session_state.last_truncated_messages = None
+                st.session_state.last_truncated_system = None
+                
         except Exception as e:
             response = f"Error: {str(e)}"
+            st.session_state.last_truncated_response = None
     else:
         response = "Please configure your Claude API key to use chat."
     
