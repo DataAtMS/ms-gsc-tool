@@ -883,25 +883,32 @@ Possible reasons:
         if not opportunities:
             st.info("No opportunities found. Try pulling data for a different domain.")
         else:
-            # Selection controls
-            col1, col2, col3 = st.columns([2, 1, 1])
-            with col1:
-                selected_count = len(st.session_state.selected_opportunities)
-                st.markdown(f"**Selected: {selected_count} of {len(opportunities)}**")
-            with col2:
-                if st.button("Select Top 10", use_container_width=True):
-                    top_10_ids = [opp['id'] for opp in opportunities[:10]]
-                    st.session_state.selected_opportunities = set(top_10_ids)
-                    st.rerun()
-            with col3:
-                if st.button("Generate Selected", type="primary", use_container_width=True, disabled=selected_count == 0):
-                    selected_opps = [
-                        opp for opp in opportunities 
-                        if opp['id'] in st.session_state.selected_opportunities
-                    ]
-                    st.session_state.pending_generation = selected_opps
-                    st.session_state.show_confirm_modal = True
-                    st.rerun()
+            # Filter + search controls (Phase 1 layout)
+            filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 2])
+            with filter_col1:
+                filter_type = st.selectbox(
+                    "Type",
+                    options=["All", "NEW", "REFRESH"],
+                    index=0
+                )
+            with filter_col2:
+                # Placeholder for additional filters later (e.g., position range)
+                filter_dummy = st.selectbox("Filter", options=["All"], index=0, label_visibility="hidden")
+            with filter_col3:
+                search_query = st.text_input("Search by keyword or URL", value="")
+            
+            # Apply filters
+            def matches_filters(opp):
+                type_ok = (filter_type == "All") or (opp['type'] == filter_type)
+                if not type_ok:
+                    return False
+                if search_query:
+                    q = search_query.lower()
+                    if q not in opp['keyword'].lower() and q not in (opp.get('page') or '').lower():
+                        return False
+                return True
+            
+            filtered_opportunities = [opp for opp in opportunities if matches_filters(opp)]
             
             st.markdown("---")
             
@@ -927,7 +934,7 @@ Possible reasons:
             st.markdown("---")
             
             # Opportunities table
-            for idx, opp in enumerate(opportunities, 1):
+            for idx, opp in enumerate(filtered_opportunities, 1):
                 is_selected = opp['id'] in st.session_state.selected_opportunities
                 is_expanded = st.session_state.expanded_opportunity == opp['id']
                 
@@ -1007,6 +1014,30 @@ Possible reasons:
                         
                         st.markdown("---")
                         st.text_area("Edit Brief (optional):", key=f"brief_{opp['id']}", height=100)
+
+            # AI Content Generation card (Phase 1 structure)
+            st.markdown("---")
+            st.markdown("### 🤖 AI CONTENT GENERATION")
+            with st.container():
+                selected_count = len(st.session_state.selected_opportunities)
+                st.markdown(f"Select opportunities above to generate data-backed content.")
+                st.markdown(f"**{selected_count} selected**")
+                
+                col_a, col_b = st.columns([1, 2])
+                with col_a:
+                    if st.button("Select Top 10", use_container_width=True):
+                        top_10_ids = [opp['id'] for opp in filtered_opportunities[:10]]
+                        st.session_state.selected_opportunities = set(top_10_ids)
+                        st.rerun()
+                with col_b:
+                    if st.button("Generate Selected", type="primary", use_container_width=True, disabled=selected_count == 0):
+                        selected_opps = [
+                            opp for opp in opportunities 
+                            if opp['id'] in st.session_state.selected_opportunities
+                        ]
+                        st.session_state.pending_generation = selected_opps
+                        st.session_state.show_confirm_modal = True
+                        st.rerun()
 
 # ============================================================================
 # TAB 2: GENERATED CONTENT
