@@ -673,6 +673,38 @@ def apply_custom_css():
         font-weight: 600;
         text-transform: uppercase;
     }
+
+    /* Opportunity row hover */
+    .opportunity-row {
+        transition: all 0.2s ease;
+        border-radius: 8px;
+    }
+    .opportunity-row:hover {
+        background: #F3F0FF;
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+    }
+
+    /* Progress bar container (for future use) */
+    .progress-container {
+        background: #E5E7EB;
+        border-radius: 8px;
+        height: 8px;
+        overflow: hidden;
+    }
+    .progress-bar {
+        background: linear-gradient(90deg, #8B5CF6, #A78BFA);
+        height: 100%;
+        transition: width 0.3s ease;
+    }
+
+    /* Generating pulse */
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    .generating {
+        animation: pulse 2s infinite;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -939,8 +971,12 @@ Possible reasons:
                 is_expanded = st.session_state.expanded_opportunity == opp['id']
                 
                 # Row container
-                row_style = "background-color: #F3E8FF; padding: 12px; border-radius: 6px; margin-bottom: 8px;" if is_selected else "padding: 12px; border: 1px solid #E5E7EB; border-radius: 6px; margin-bottom: 8px;"
-                
+                row_class = "opportunity-row"
+                if is_selected:
+                    st.markdown("<div class='opportunity-row' style='background-color: #F3E8FF; padding: 12px; margin-bottom: 8px;'>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<div class='opportunity-row' style='padding: 12px; border: 1px solid #E5E7EB; margin-bottom: 8px;'>", unsafe_allow_html=True)
+
                 with st.container():
                     cols = st.columns([0.5, 1, 2, 1.5, 1.5, 1, 1, 1])
                     
@@ -988,11 +1024,13 @@ Possible reasons:
                             else:
                                 st.session_state.expanded_opportunity = opp['id']
                             st.rerun()
+                # Close row container div
+                st.markdown("</div>", unsafe_allow_html=True)
                 
                 # Expanded details
                 if is_expanded:
                     with st.expander("", expanded=True):
-                        st.markdown("#### WHY THIS OPPORTUNITY?")
+                        st.markdown("#### 💡 Why this opportunity?")
                         
                         # Generate analysis
                         why, approach = generate_opportunity_analysis(
@@ -1002,7 +1040,7 @@ Possible reasons:
                         
                         st.markdown(why)
                         st.markdown("---")
-                        st.markdown("#### RECOMMENDED APPROACH")
+                        st.markdown("#### 🧭 Recommended approach")
                         st.markdown(approach)
                         st.markdown("---")
                         
@@ -1130,28 +1168,39 @@ if st.session_state.show_confirm_modal and st.session_state.pending_generation:
 
 if st.session_state.generation_in_progress and st.session_state.generation_queue:
     st.markdown("---")
-    st.markdown("### GENERATING CONTENT")
     
     total = len(st.session_state.generation_queue)
     completed = len([s for s in st.session_state.generation_status.values() if s == 'completed'])
     current_idx = completed
+    current_opp = st.session_state.generation_queue[current_idx] if current_idx < total else st.session_state.generation_queue[-1]
+    
+    st.markdown(f"### 🤖 GENERATING: {current_opp['keyword']}")
     
     progress = completed / total if total > 0 else 0
-    st.progress(progress)
+    
+    # Custom progress bar
+    st.markdown(
+        f"""
+        <div class="progress-container">
+            <div class="progress-bar" style="width: {int(progress * 100)}%;"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.markdown(f"**{completed} of {total}** ({int(progress * 100)}%)")
     
+    # Step-style status list
+    st.markdown("#### Steps")
     for idx, opp in enumerate(st.session_state.generation_queue):
         status = st.session_state.generation_status.get(opp['id'], 'pending')
         
         if status == 'completed':
-            st.markdown(f"✓ {opp['keyword']}")
-            st.caption("Done! Ready to review.")
+            st.markdown(f"✓ **{opp['keyword']}** — Done! Ready to review.")
         elif status == 'generating':
-            st.markdown(f"◆ {opp['keyword']}")
             current_msg = st.session_state.generation_status.get(f"{opp['id']}_msg", "Crafting content...")
-            st.caption(current_msg)
+            st.markdown(f"◆ **{opp['keyword']}** — <span class='generating'>{current_msg}</span>", unsafe_allow_html=True)
         else:
-            st.markdown(f"○ {opp['keyword']}")
+            st.markdown(f"○ **{opp['keyword']}** — In queue")
     
     # Process generation sequentially
     if current_idx < total:
