@@ -970,13 +970,7 @@ Possible reasons:
                 is_selected = opp['id'] in st.session_state.selected_opportunities
                 is_expanded = st.session_state.expanded_opportunity == opp['id']
                 
-                # Row container
-                row_class = "opportunity-row"
-                if is_selected:
-                    st.markdown("<div class='opportunity-row' style='background-color: #F3E8FF; padding: 12px; margin-bottom: 8px;'>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<div class='opportunity-row' style='padding: 12px; border: 1px solid #E5E7EB; margin-bottom: 8px;'>", unsafe_allow_html=True)
-
+                # Simple row container (no custom div wrapper to avoid hover artifacts)
                 with st.container():
                     cols = st.columns([0.5, 1, 2, 1.5, 1.5, 1, 1, 1])
                     
@@ -994,7 +988,6 @@ Possible reasons:
                         st.markdown(f"**{idx}**")
                     
                     with cols[2]:
-                        badge_class = "badge-new" if opp['type'] == 'NEW' else "badge-refresh"
                         badge_text = "NEW" if opp['type'] == 'NEW' else "REFRESH"
                         badge_color = "#10B981" if opp['type'] == 'NEW' else "#F59E0B"
                         st.markdown(f"<span style='background-color: {badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;'>{badge_text}</span>", unsafe_allow_html=True)
@@ -1024,8 +1017,6 @@ Possible reasons:
                             else:
                                 st.session_state.expanded_opportunity = opp['id']
                             st.rerun()
-                # Close row container div
-                st.markdown("</div>", unsafe_allow_html=True)
                 
                 # Expanded details
                 if is_expanded:
@@ -1053,29 +1044,7 @@ Possible reasons:
                         st.markdown("---")
                         st.text_area("Edit Brief (optional):", key=f"brief_{opp['id']}", height=100)
 
-            # AI Content Generation card (Phase 1 structure)
-            st.markdown("---")
-            st.markdown("### 🤖 AI CONTENT GENERATION")
-            with st.container():
-                selected_count = len(st.session_state.selected_opportunities)
-                st.markdown(f"Select opportunities above to generate data-backed content.")
-                st.markdown(f"**{selected_count} selected**")
-                
-                col_a, col_b = st.columns([1, 2])
-                with col_a:
-                    if st.button("Select Top 10", use_container_width=True):
-                        top_10_ids = [opp['id'] for opp in filtered_opportunities[:10]]
-                        st.session_state.selected_opportunities = set(top_10_ids)
-                        st.rerun()
-                with col_b:
-                    if st.button("Generate Selected", type="primary", use_container_width=True, disabled=selected_count == 0):
-                        selected_opps = [
-                            opp for opp in opportunities 
-                            if opp['id'] in st.session_state.selected_opportunities
-                        ]
-                        st.session_state.pending_generation = selected_opps
-                        st.session_state.show_confirm_modal = True
-                        st.rerun()
+            # (AI Content Generation card removed per request; generation is triggered via existing controls)
 
 # ============================================================================
 # TAB 2: GENERATED CONTENT
