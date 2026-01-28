@@ -686,18 +686,23 @@ with tab1:
     # Domain input (if no data loaded)
     if not st.session_state.gsc_data:
         st.markdown("### Connect Your Search Console Data")
-        domain_input = st.text_input(
-            "Domain",
-            value=st.session_state.domain,
-            placeholder="sc-domain:example.com or https://example.com/",
-            help="Enter the exact domain format from Google Search Console. For 'heatmap.com' property, use 'sc-domain:heatmap.com'"
-        )
-        
-        # Helper text for common issues
-        if domain_input and domain_input.startswith('https://'):
-            st.info("💡 **Tip:** If your property shows as 'heatmap.com' (not 'https://heatmap.com/'), try using `sc-domain:heatmap.com` instead")
-        
-        if st.button("Pull GSC Data", type="primary", use_container_width=True):
+
+        # Wrap input + submit in a form so pressing Enter submits it
+        with st.form("gsc_domain_form"):
+            domain_input = st.text_input(
+                "Domain",
+                value=st.session_state.domain,
+                placeholder="sc-domain:example.com or https://example.com/",
+                help="Enter the exact domain format from Google Search Console. For 'heatmap.com' property, use 'sc-domain:heatmap.com'"
+            )
+            
+            # Helper text for common issues
+            if domain_input and domain_input.startswith('https://'):
+                st.info("💡 **Tip:** If your property shows as 'heatmap.com' (not 'https://heatmap.com/'), try using `sc-domain:heatmap.com` instead")
+
+            submit_gsc = st.form_submit_button("Pull GSC Data", type="primary", use_container_width=True)
+
+        if submit_gsc:
             if not domain_input:
                 st.error("Please enter a domain")
             else:
