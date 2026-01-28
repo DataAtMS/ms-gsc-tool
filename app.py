@@ -11,6 +11,9 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import os
 import time
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
@@ -60,30 +63,38 @@ if 'pending_generation' not in st.session_state:
 def authenticate():
     """Authenticate with Google Search Console API using Service Account."""
     service_account_info = None
+    error_msg = None
     
     try:
         if 'GOOGLE_SERVICE_ACCOUNT' in st.secrets:
             service_account_info = st.secrets['GOOGLE_SERVICE_ACCOUNT']
             if not isinstance(service_account_info, dict):
                 service_account_info = dict(service_account_info)
-    except Exception:
+    except Exception as e:
+        error_msg = f"Error reading secrets: {str(e)}"
         service_account_info = None
     
     if service_account_info is None:
         if os.path.exists('service_account.json'):
-            with open('service_account.json', 'r') as f:
-                service_account_info = json.load(f)
+            try:
+                with open('service_account.json', 'r') as f:
+                    service_account_info = json.load(f)
+            except Exception as e:
+                error_msg = f"Error reading service_account.json: {str(e)}"
         else:
-            return None
+            error_msg = "No credentials found in secrets or service_account.json"
+    
+    if service_account_info is None:
+        return None, error_msg or "Credentials not found"
     
     try:
         creds = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=SCOPES
         )
-        return creds
+        return creds, None
     except Exception as e:
-        return None
+        return None, f"Error creating credentials: {str(e)}"
 
 def fetch_gsc_data(service, site_url, start_date, end_date, dimensions):
     """Fetch data from Google Search Console."""
@@ -98,9 +109,24 @@ def fetch_gsc_data(service, site_url, start_date, end_date, dimensions):
             siteUrl=site_url,
             body=request
         ).execute()
-        return response.get('rows', [])
+        rows = response.get('rows', [])
+        return rows, None
     except Exception as e:
-        return []
+        error_str = str(e)
+        # Provide more helpful error messages
+        if "403" in error_str or "permission" in error_str.lower():
+            # Try to get service account email from credentials
+            sa_email = "your-service-account@project.iam.gserviceaccount.com"
+            try:
+                if hasattr(service, '_http') and hasattr(service._http, 'credentials'):
+                    sa_email = getattr(service._http.credentials, 'service_account_email', sa_email)
+            except:
+                pass
+            return [], f"Permission denied. Service account '{sa_email}' needs to be added as a user in Google Search Console for property: {site_url}"
+        elif "404" in error_str or "not found" in error_str.lower():
+            return [], f"Property not found: {site_url}. Check that the domain format is correct (e.g., 'sc-domain:example.com' or 'https://example.com/')"
+        else:
+            return [], f"Error fetching data: {error_str}"
 
 def format_data(rows, dimensions):
     """Format API response into readable data."""
@@ -116,6 +142,128 @@ def format_data(rows, dimensions):
         item['position'] = round(row.get('position', 0), 2)
         formatted.append(item)
     return formatted
+
+# ============================================================================
+# WEB SCRAPING
+# ============================================================================
+
+def scrape_page_content(url):
+    """Scrape page content from a URL."""
+    try:
+        # Set headers to avoid blocking
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        # Make request with timeout
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        response.raise_for_status()
+        
+        # Parse HTML
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extract title
+        title_tag = soup.find('title')
+        title = title_tag.get_text(strip=True) if title_tag else None
+        
+        # Extract meta description
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if not meta_desc:
+            meta_desc = soup.find('meta', attrs={'property': 'og:description'})
+        meta_description = meta_desc.get('content', '').strip() if meta_desc else None
+        
+        # Extract H1
+        h1_tag = soup.find('h1')
+        h1 = h1_tag.get_text(strip=True) if h1_tag else None
+        
+        # Extract all headings (H2-H6)
+        headings = []
+        for tag in soup.find_all(['h2', 'h3', 'h4', 'h5', 'h6']):
+            headings.append({
+                'level': tag.name,
+                'text': tag.get_text(strip=True)
+            })
+        
+        # Extract body text (main content)
+        # Remove script and style elements
+        for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            script.decompose()
+        
+        # Get text from main content areas
+        body_text = ""
+        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=lambda x: x and ('content' in x.lower() or 'main' in x.lower() or 'post' in x.lower()))
+        
+        if main_content:
+            body_text = main_content.get_text(separator=' ', strip=True)
+        else:
+            # Fallback to body tag
+            body = soup.find('body')
+            if body:
+                body_text = body.get_text(separator=' ', strip=True)
+        
+        # Limit body text length (first 5000 chars)
+        if body_text:
+            body_text = body_text[:5000] + "..." if len(body_text) > 5000 else body_text
+        
+        return {
+            'url': url,
+            'title': title,
+            'meta_description': meta_description,
+            'h1': h1,
+            'headings': headings,
+            'body_text': body_text,
+            'scraped_at': datetime.now().isoformat(),
+            'status': 'success'
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            'url': url,
+            'status': 'error',
+            'error': f"Request error: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            'url': url,
+            'status': 'error',
+            'error': f"Scraping error: {str(e)}"
+        }
+
+def scrape_top_pages(pages_data, max_pages=20):
+    """Scrape content from top pages by clicks."""
+    if not pages_data:
+        return []
+    
+    # Sort by clicks and take top pages
+    sorted_pages = sorted(pages_data, key=lambda x: x.get('clicks', 0), reverse=True)
+    top_pages = sorted_pages[:max_pages]
+    
+    scraped_content = []
+    
+    for page in top_pages:
+        url = page.get('page', '')
+        if not url:
+            continue
+        
+        # Ensure URL is absolute
+        if url.startswith('/'):
+            # If relative URL, we need the domain - skip for now or use domain from GSC data
+            continue
+        
+        # Scrape the page
+        content = scrape_page_content(url)
+        # Merge with GSC metrics
+        content.update({
+            'clicks': page.get('clicks', 0),
+            'impressions': page.get('impressions', 0),
+            'ctr': page.get('ctr', 0),
+            'position': page.get('position', 0)
+        })
+        scraped_content.append(content)
+        
+        # Small delay to be respectful
+        time.sleep(0.5)
+    
+    return scraped_content
 
 # ============================================================================
 # OPPORTUNITY SCORING
@@ -487,8 +635,12 @@ with tab1:
             "Domain",
             value=st.session_state.domain,
             placeholder="sc-domain:example.com or https://example.com/",
-            help="Enter the exact domain format from Google Search Console"
+            help="Enter the exact domain format from Google Search Console. For 'heatmap.com' property, use 'sc-domain:heatmap.com'"
         )
+        
+        # Helper text for common issues
+        if domain_input and domain_input.startswith('https://'):
+            st.info("💡 **Tip:** If your property shows as 'heatmap.com' (not 'https://heatmap.com/'), try using `sc-domain:heatmap.com` instead")
         
         if st.button("Pull GSC Data", type="primary", use_container_width=True):
             if not domain_input:
@@ -499,32 +651,23 @@ with tab1:
                     status.update(label="Connecting to Search Console...", state="running")
                     time.sleep(0.5)
                     
-                    creds = authenticate()
+                    creds, auth_error = authenticate()
                     if not creds:
                         status.update(label="❌ Authentication failed", state="error")
-                        st.error("""
+                        error_details = auth_error or "Unknown authentication error"
+                        st.error(f"""
 **Couldn't connect to Search Console.**
 
-For local development, you need to set up credentials in one of these ways:
+**Error:** {error_details}
 
-**Option 1: Create `.streamlit/secrets.toml` file**
-```
-[GOOGLE_SERVICE_ACCOUNT]
-type = "service_account"
-project_id = "your-project-id"
-private_key_id = "your-private-key-id"
-private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-client_email = "your-service-account@project.iam.gserviceaccount.com"
-client_id = "your-client-id"
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/..."
-```
+**For local development:**
+1. Create `.streamlit/secrets.toml` with your `[GOOGLE_SERVICE_ACCOUNT]` credentials, OR
+2. Place `service_account.json` file in the project directory
 
-**Option 2: Place `service_account.json` file in the project directory**
+**For Streamlit Cloud:**
+Add `GOOGLE_SERVICE_ACCOUNT` to your app's secrets.
 
-Make sure the service account has been granted access to your Search Console property.
+**Important:** Make sure the service account email has been granted access to your Search Console property.
                         """)
                     else:
                         service = build(API_SERVICE_NAME, API_VERSION, credentials=creds)
@@ -537,26 +680,87 @@ Make sure the service account has been granted access to your Search Console pro
                         start_str = start_date.strftime('%Y-%m-%d')
                         end_str = end_date.strftime('%Y-%m-%d')
                         
-                        status.update(label="Analyzing opportunities...", state="running")
-                        time.sleep(0.5)
+                        status.update(label="Fetching query data...", state="running")
+                        query_rows, query_error = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
                         
-                        query_rows = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
+                        if query_error:
+                            status.update(label="❌ Error fetching queries", state="error")
+                            st.error(f"**Query Data Error:** {query_error}")
+                            
+                            # Provide helpful troubleshooting
+                            st.markdown("""
+                            **Troubleshooting Steps:**
+                            
+                            1. **Verify the property format in Search Console:**
+                               - Go to [Search Console](https://search.google.com/search-console)
+                               - Check if your property shows as `https://heatmap.com/` or `sc-domain:heatmap.com`
+                               - Use the EXACT format shown in Search Console
+                            
+                            2. **Check service account is added to THIS property:**
+                               - In Search Console, select the property: `https://heatmap.com/`
+                               - Go to Settings → Users and permissions
+                               - Verify `gsc-reader@gsc-api-v1-485110.iam.gserviceaccount.com` is listed
+                               - If not, add it with "Full" access
+                            
+                            3. **Try the alternative format:**
+                               - If using `https://heatmap.com/`, try `sc-domain:heatmap.com`
+                               - If using `sc-domain:heatmap.com`, try `https://heatmap.com/`
+                            
+                            4. **Wait a few minutes** after adding the service account (permissions can take 2-5 minutes to propagate)
+                            """)
+                            st.stop()
+                        
                         query_data = format_data(query_rows, ['query'])
                         
-                        page_rows = fetch_gsc_data(service, domain_input, start_str, end_str, ['page'])
+                        status.update(label="Fetching page data...", state="running")
+                        page_rows, page_error = fetch_gsc_data(service, domain_input, start_str, end_str, ['page'])
+                        
+                        if page_error:
+                            status.update(label="❌ Error fetching pages", state="error")
+                            st.error(f"**Page Data Error:** {page_error}")
+                            st.stop()
+                        
                         page_data = format_data(page_rows, ['page'])
+                        
+                        # Check if we got any data
+                        if not query_data and not page_data:
+                            status.update(label="⚠️ No data found", state="error")
+                            st.warning(f"""
+**No data returned for {domain_input}**
+
+Possible reasons:
+1. No search data in the last 90 days
+2. Service account doesn't have access to this property
+3. Domain format is incorrect
+
+**To fix:**
+- Verify the domain format (try both `sc-domain:example.com` and `https://example.com/`)
+- Check that the service account email is added as a user in Google Search Console
+- Try a different date range or property
+                            """)
+                            st.stop()
                         
                         status.update(label="Ranking by ROI potential...", state="running")
                         time.sleep(0.5)
                         
+                        # Scrape top pages content
+                        scraped_pages = []
+                        if page_data:
+                            status.update(label="Scraping top pages content...", state="running")
+                            with st.spinner("Fetching page content (this may take a minute)..."):
+                                scraped_pages = scrape_top_pages(page_data, max_pages=20)
+                        
                         st.session_state.gsc_data = {
                             'queries': query_data,
                             'pages': page_data,
+                            'scraped_pages': scraped_pages,  # Add scraped content
                             'domain': domain_input,
                             'date_range': f"{start_str} to {end_str}"
                         }
                         
-                        status.update(label="Done! Found opportunities.", state="complete")
+                        total_opps = len(query_data) + len(page_data)
+                        scraped_count = len([p for p in scraped_pages if p.get('status') == 'success'])
+                        status.update(label=f"Done! Found {total_opps} data points. Scraped {scraped_count} pages.", state="complete")
                         st.rerun()
     else:
         # Opportunities table
@@ -901,18 +1105,102 @@ if user_input:
         try:
             client = Anthropic(api_key=st.session_state.claude_api_key)
             
-            # Build context from generated content
-            context = ""
-            if st.session_state.generated_content:
-                context = "\n\nGenerated Content:\n"
-                for content in st.session_state.generated_content[-5:]:  # Last 5 items
-                    context += f"- {content['title']} ({content['type']})\n"
+            # Build context from GSC data
+            context_parts = []
             
-            messages = [{"role": "user", "content": user_input + context}]
+            if st.session_state.gsc_data:
+                gsc_data = st.session_state.gsc_data
+                domain = gsc_data.get('domain', 'unknown')
+                date_range = gsc_data.get('date_range', 'unknown')
+                queries = gsc_data.get('queries', [])
+                pages = gsc_data.get('pages', [])
+                scraped_pages = gsc_data.get('scraped_pages', [])
+                
+                # Get top performing queries
+                top_queries = sorted(queries, key=lambda x: x.get('clicks', 0), reverse=True)[:20]
+                
+                # Build pages context with scraped content
+                pages_context = []
+                if scraped_pages:
+                    for page in scraped_pages[:15]:  # Top 15 scraped pages
+                        if page.get('status') == 'success':
+                            pages_context.append({
+                                'url': page.get('url'),
+                                'title': page.get('title'),
+                                'meta_description': page.get('meta_description'),
+                                'h1': page.get('h1'),
+                                'headings_count': len(page.get('headings', [])),
+                                'body_preview': page.get('body_text', '')[:500] if page.get('body_text') else None,
+                                'clicks': page.get('clicks', 0),
+                                'impressions': page.get('impressions', 0),
+                                'ctr': page.get('ctr', 0),
+                                'position': page.get('position', 0)
+                            })
+                        else:
+                            # Include pages that failed to scrape but have GSC data
+                            pages_context.append({
+                                'url': page.get('url'),
+                                'clicks': page.get('clicks', 0),
+                                'impressions': page.get('impressions', 0),
+                                'ctr': page.get('ctr', 0),
+                                'position': page.get('position', 0),
+                                'scrape_status': 'failed',
+                                'error': page.get('error', 'Unknown error')
+                            })
+                else:
+                    # Fallback to pages without scraped content
+                    top_pages = sorted(pages, key=lambda x: x.get('clicks', 0), reverse=True)[:20]
+                    pages_context = top_pages
+                
+                context_parts.append(f"""
+**Google Search Console Data Context:**
+- Domain: {domain}
+- Date Range: {date_range}
+- Total Queries: {len(queries)}
+- Total Pages: {len(pages)}
+- Pages Scraped: {len([p for p in scraped_pages if p.get('status') == 'success')]}
+
+**Top Performing Queries (by clicks):**
+{json.dumps(top_queries, indent=2) if top_queries else "No query data"}
+
+**Top Performing Pages with Content Analysis:**
+{json.dumps(pages_context, indent=2) if pages_context else "No page data"}
+
+**Note:** Pages include scraped content (title, meta description, headings, body text) when available, allowing for content quality analysis alongside traffic metrics.
+""")
+            
+            # Add generated content context
+            if st.session_state.generated_content:
+                context_parts.append("\n**Generated Content:**\n")
+                for content in st.session_state.generated_content[-5:]:  # Last 5 items
+                    context_parts.append(f"- {content['title']} ({content['type']}) - {content['date']}\n")
+            
+            # Build full context
+            context = "\n".join(context_parts) if context_parts else ""
+            
+            # Create system message
+            system_message = """You are an SEO analyst assistant helping with Google Search Console data analysis and content strategy. 
+You have access to GSC data including queries, pages, clicks, impressions, CTR, and position data.
+You can answer questions about:
+- Top performing content/pages
+- Search query performance
+- Content opportunities
+- SEO recommendations
+- Performance metrics
+
+Be specific and reference actual data from the GSC context when available."""
+            
+            # Build messages with context
+            full_message = user_input
+            if context:
+                full_message = f"{context}\n\n**User Question:** {user_input}"
+            
+            messages = [{"role": "user", "content": full_message}]
             
             response_obj = client.messages.create(
                 model="claude-opus-4-5-20251101",
                 max_tokens=4000,
+                system=system_message,
                 messages=messages
             )
             response = response_obj.content[0].text
