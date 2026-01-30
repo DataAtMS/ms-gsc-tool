@@ -729,6 +729,7 @@ with col1:
 with col3:
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.session_state.gsc_data = None
+        st.session_state.domain = ''  # Clear cached domain
         st.session_state.selected_opportunities = set()
         st.rerun()
 
@@ -765,6 +766,8 @@ with tab1:
             if not domain_input:
                 st.error("Please enter a domain")
             else:
+                # Trim whitespace and ensure exact match
+                domain_input = domain_input.strip()
                 st.session_state.domain = domain_input
                 with st.status("Connecting to Search Console...", expanded=True) as status:
                     status.update(label="Connecting to Search Console...", state="running")
@@ -818,13 +821,41 @@ with tab1:
                             sites_list = service.sites().list().execute()
                             available_sites = [site.get('siteUrl', '') for site in sites_list.get('siteEntry', [])]
                             if available_sites:
+                                # Check for exact match
+                                exact_match = domain_input in available_sites
+                                
+                                # If no exact match, try to find a close match
+                                suggested_domain = None
+                                if not exact_match:
+                                    # Try to find URL prefix version if sc-domain was used
+                                    if domain_input.startswith('sc-domain:'):
+                                        base_domain = domain_input.replace('sc-domain:', '')
+                                        for site in available_sites:
+                                            if base_domain in site or site.replace('https://', '').replace('/', '') == base_domain:
+                                                suggested_domain = site
+                                                break
+                                    # Try to find sc-domain version if URL was used
+                                    elif domain_input.startswith('https://'):
+                                        base_domain = domain_input.replace('https://', '').replace('/', '')
+                                        for site in available_sites:
+                                            if site.startswith('sc-domain:') and base_domain in site:
+                                                suggested_domain = site
+                                                break
+                                
                                 st.info(f"""
 **Available properties for this service account:**
 {chr(10).join(f"- `{site}`" for site in available_sites[:15])}
 
 **You're trying:** `{domain_input}`
-**Match found:** {'✅ Yes' if domain_input in available_sites else '❌ No - Use one of the formats above'}
+**Match found:** {'✅ Yes' if exact_match else '❌ No - Use one of the formats above'}
+{f'**💡 Try this instead:** `{suggested_domain}`' if suggested_domain and not exact_match else ''}
                                 """)
+                                
+                                # If we found a suggested domain, use it automatically
+                                if suggested_domain and not exact_match:
+                                    domain_input = suggested_domain
+                                    st.session_state.domain = domain_input
+                                    st.info(f"🔄 **Auto-corrected to:** `{domain_input}`")
                         except Exception as list_error:
                             st.warning(f"Could not list available sites: {str(list_error)}")
                         
