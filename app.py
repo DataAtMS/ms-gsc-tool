@@ -816,17 +816,32 @@ with tab1:
                         except:
                             pass
                         
-                        # List available sites BEFORE trying to fetch
-                        try:
-                            sites_list = service.sites().list().execute()
-                            available_sites = [site.get('siteUrl', '') for site in sites_list.get('siteEntry', [])]
-                            if available_sites:
+                        # Try to fetch data FIRST - don't check available sites until we know if there's an error
+                        # This avoids showing false negatives when permissions are still propagating
+                        status.update(label="Fetching query data...", state="running")
+                        query_rows, query_error = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
+                        
+                        if query_error:
+                            # Only now check available sites to help diagnose the issue
+                            available_sites = []
+                            try:
+                                sites_list = service.sites().list().execute()
+                                available_sites = [site.get('siteUrl', '') for site in sites_list.get('siteEntry', [])]
+                            except:
+                                pass  # Don't block if we can't list sites
+                            
+                            # Check if it's a permission error (403) - might just need time to propagate
+                            is_permission_error = '403' in str(query_error) or 'permission' in str(query_error).lower()
+                            
+                            if is_permission_error:
+                                status.update(label="⏳ Permission issue detected", state="running")
+                                
                                 # Check for exact match
-                                exact_match = domain_input in available_sites
+                                exact_match = domain_input in available_sites if available_sites else False
                                 
                                 # If no exact match, try to find a close match
                                 suggested_domain = None
-                                if not exact_match:
+                                if available_sites and not exact_match:
                                     # Try to find URL prefix version if sc-domain was used
                                     if domain_input.startswith('sc-domain:'):
                                         base_domain = domain_input.replace('sc-domain:', '')
@@ -842,46 +857,29 @@ with tab1:
                                                 suggested_domain = site
                                                 break
                                 
+                                # Show helpful message without red X - make it clear this might just be timing
+                                match_status = f'**Match found:** ✅ Yes' if exact_match else (f'**💡 Suggested format:** `{suggested_domain}`' if suggested_domain else '**Note:** Format not in available properties list (but permissions might still be syncing)')
+                                
                                 st.info(f"""
-**Available properties for this service account:**
-{chr(10).join(f"- `{site}`" for site in available_sites[:15])}
+**⏳ Permission Error - Usually Just Needs Time**
+
+**Most Common Cause:** Permissions are still propagating (2-5 minutes after adding service account)
+
+**What to do:**
+1. **Wait 2-5 minutes** and click "Pull GSC Data" again - permissions often just need time to sync
+2. If it still fails after waiting, verify the service account `gsc-reader@gsc-api-v1-485110.iam.gserviceaccount.com` is added to this property in Google Search Console (Settings → Users and permissions)
+
+{f'**Available properties for this service account:**{chr(10)}{chr(10).join(f"- `{site}`" for site in available_sites[:15])}' if available_sites else ''}
 
 **You're trying:** `{domain_input}`
-**Match found:** {'✅ Yes' if exact_match else '❌ No - Use one of the formats above'}
-{f'**💡 Try this instead:** `{suggested_domain}`' if suggested_domain and not exact_match else ''}
+{match_status}
+
+**💡 Tip:** If you just added the service account, this error is normal. Wait 2-5 minutes and try again.
                                 """)
-                                
-                                # If we found a suggested domain, use it automatically
-                                if suggested_domain and not exact_match:
-                                    domain_input = suggested_domain
-                                    st.session_state.domain = domain_input
-                                    st.info(f"🔄 **Auto-corrected to:** `{domain_input}`")
-                        except Exception as list_error:
-                            st.warning(f"Could not list available sites: {str(list_error)}")
-                        
-                        status.update(label="Fetching query data...", state="running")
-                        query_rows, query_error = fetch_gsc_data(service, domain_input, start_str, end_str, ['query'])
-                        
-                        if query_error:
-                            status.update(label="❌ Error fetching queries", state="error")
-                            st.error(f"**Query Data Error:** {query_error}")
+                            else:
+                                status.update(label="❌ Error fetching queries", state="error")
+                                st.error(f"**Query Data Error:** {query_error}")
                             
-                            # Provide helpful troubleshooting
-                            st.markdown("""
-                            **Troubleshooting Steps:**
-                            
-                            1. **Check the available properties above** - Use the EXACT format shown
-                            
-                            2. **Verify service account is added to THIS property:**
-                               - In Search Console, select the property
-                               - Go to Settings → Users and permissions
-                               - Verify `gsc-reader@gsc-api-v1-485110.iam.gserviceaccount.com` is listed
-                               - If not, add it with "Full" access
-                            
-                            3. **Wait 2-5 minutes** after adding the service account (permissions need time to propagate)
-                            
-                            4. **Check the full error message above** for specific details
-                            """)
                             st.stop()
                         
                         query_data = format_data(query_rows, ['query'])
